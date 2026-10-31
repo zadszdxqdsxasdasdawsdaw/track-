@@ -108,15 +108,52 @@
       }
       return best;
     }
-    function completionRate(habitId, completions, days = 30) {
-      let done = 0;
-      for (let i = 0; i < days; i++) {
-        if (isDone(completions[habitId]?.[addDays(isoDate(), -i)])) done++;
+    function habitCompletionRate(habitId, completions, fromDate, toDate) {
+      let done = 0, total = 0;
+      let cur = fromDate;
+      while (cur <= toDate) {
+        total++;
+        if (isDone(completions[habitId]?.[cur])) done++;
+        cur = addDays(cur, 1);
       }
-      return done / days;
+      return total > 0 ? done / total : 0;
     }
     function totalDone(habitId, completions) {
       return Object.values(completions[habitId] || {}).filter(isDone).length;
+    }
+    function weightSeriesInRange(weights, fromDate, toDate) {
+      return Object.entries(weights || {})
+        .filter(([d]) => d >= fromDate && d <= toDate)
+        .map(([d, v]) => ({ date: d, kg: v.kg, ts: v.ts }))
+        .sort((a, b) => a.date.localeCompare(b.date));
+    }
+    function weightMovingAvg(entries, window = 7) {
+      return entries.map((e, i) => {
+        const from = Math.max(0, i - window + 1);
+        const win = entries.slice(from, i + 1);
+        const ma = win.length >= Math.min(3, entries.length)
+          ? win.reduce((a, w) => a + w.kg, 0) / win.length
+          : undefined;
+        return { ...e, ma };
+      });
+    }
+    function slopePerWeek(entries) {
+      if (entries.length < 4) return null;
+      const sorted = [...entries].sort((a, b) => a.date.localeCompare(b.date));
+      const t0 = new Date(sorted[0].date + 'T00:00:00').getTime();
+      const pts = sorted.map(e => ({ x: (new Date(e.date + 'T00:00:00').getTime() - t0) / 86400000, y: e.kg }));
+      const n = pts.length;
+      const sx = pts.reduce((a, p) => a + p.x, 0), sy = pts.reduce((a, p) => a + p.y, 0);
+      const sxx = pts.reduce((a, p) => a + p.x * p.x, 0), sxy = pts.reduce((a, p) => a + p.x * p.y, 0);
+      const d = n * sxx - sx * sx;
+      if (Math.abs(d) < 1e-9) return null;
+      return ((n * sxy - sx * sy) / d) * 7;
+    }
+    function kcalSeriesInRange(kcal, fromDate, toDate) {
+      return Object.entries(kcal || {})
+        .filter(([d]) => d >= fromDate && d <= toDate)
+        .map(([d, v]) => ({ date: d, value: v.value, ts: v.ts }))
+        .sort((a, b) => a.date.localeCompare(b.date));
     }
 
     /* ===================== COLORS ===================== */
@@ -140,73 +177,92 @@
         'X-GitHub-Api-Version': '2022-11-28'
       };
     }
-
     async function ghVerify(token) {
       const r = await fetch(`${GH}/user`, { headers: ghHeaders(token) });
       if (r.status === 401) throw new Error('неверный токен или истёк');
       if (!r.ok) throw new Error(`github /user: ${r.status}`);
       return r.json();
     }
-
     async function ghGetRepo(token, owner, name) {
       const r = await fetch(`${GH}/repos/${owner}/${name}`, { headers: ghHeaders(token) });
       if (r.status === 404) return null;
       if (!r.ok) throw new Error(`repo ${r.status}`);
       return r.json();
     }
-
     async function ghCreateRepo(token, name) {
       const r = await fetch(`${GH}/user/repos`, {
         method: 'POST', headers: ghHeaders(token),
         body: JSON.stringify({
-          name,
-          private: true,
-          auto_init: true,
+          name, private: true, auto_init: true,
           description: 'Habits tracker data (do not rename — app relies on this name)'
         })
       });
       if (!r.ok) {
         const err = await r.json().catch(() => ({}));
-        const msg = err?.message || `create repo ${r.status}`;
-        throw new Error(msg + ' — создай приватный репозиторий вручную или используй классический токен со scope repo');
+        throw new Error((err?.message || `create repo ${r.status}`) + ' — создай приватный репозиторий вручную или используй классический токен со scope repo');
       }
       return r.json();
     }
-
     async function ghGetFile(token, owner, name, path) {
       const r = await fetch(`${GH}/repos/${owner}/${name}/contents/${path}`, { headers: ghHeaders(token) });
       if (r.status === 404) return null;
       if (!r.ok) throw new Error(`file ${r.status}`);
       const data = await r.json();
       if (Array.isArray(data)) throw new Error('ожидался файл, пришёл каталог');
-      const b64 = (data.content || '').replace(/\s/g, '');
-      const content = b64decodeUnicode(b64);
-      return { content, sha: data.sha };
+      return { content: b64decodeUnicode((data.content || '').replace(/\s/g, '')), sha: data.sha };
     }
-
     async function ghPutFile(token, owner, name, path, content, sha) {
-      const body = {
-        message: `habits update ${new Date().toISOString()}`,
-        content: b64encodeUnicode(content)
-      };
+      const body = { message: `habits update ${new Date().toISOString()}`, content: b64encodeUnicode(content) };
       if (sha) body.sha = sha;
       const r = await fetch(`${GH}/repos/${owner}/${name}/contents/${path}`, {
-        method: 'PUT', headers: ghHeaders(token),
-        body: JSON.stringify(body)
+        method: 'PUT', headers: ghHeaders(token), body: JSON.stringify(body)
       });
       if (!r.ok) {
         const err = await r.json().catch(() => ({}));
-        const msg = err?.message || `put ${r.status}`;
-        const e = new Error(msg);
+        const e = new Error(err?.message || `put ${r.status}`);
         e.status = r.status;
         throw e;
       }
       return r.json();
     }
 
-    function emptyState() { return { habits: [], completions: {}, deleted: {} }; }
+    /* ===================== STATE + MERGE ===================== */
+    function emptyState() {
+      return {
+        habits: [], completions: {}, deleted: {},
+        weights: {}, weightDeleted: {},
+        kcal: {}, kcalDeleted: {},
+        settings: { kcalTarget: 2200, updatedAt: 0 }
+      };
+    }
+
+    function mergeTimedMaps(a, b, aDel, bDel) {
+      const out = {};
+      for (const src of [a || {}, b || {}]) {
+        for (const [k, v] of Object.entries(src)) {
+          const ex = out[k];
+          const nTs = (v && typeof v === 'object') ? (v.ts || 0) : 0;
+          const oTs = (ex && typeof ex === 'object') ? (ex.ts || 0) : 0;
+          if (!ex || nTs >= oTs) out[k] = v;
+        }
+      }
+      const deleted = { ...(aDel || {}), ...(bDel || {}) };
+      for (const [k, ts] of Object.entries(deleted)) {
+        const v = out[k];
+        if (v && (v.ts || 0) <= ts) delete out[k];
+      }
+      return { data: out, deleted };
+    }
+
+    function mergeSettings(a, b) {
+      const A = a || { updatedAt: 0 };
+      const B = b || { updatedAt: 0 };
+      const base = { kcalTarget: 2200 };
+      return (A.updatedAt || 0) >= (B.updatedAt || 0) ? { ...base, ...B, ...A } : { ...base, ...A, ...B };
+    }
 
     function mergeStates(a, b) {
+      a = a || {}; b = b || {};
       const habitMap = new Map();
       for (const h of [...(a.habits || []), ...(b.habits || [])]) {
         const prev = habitMap.get(h.id);
@@ -223,14 +279,25 @@
           if (!comp[hid]) comp[hid] = {};
           for (const [d, val] of Object.entries(dates)) {
             const ex = comp[hid][d];
-            const newTs = (val && typeof val === 'object') ? (val.ts || 0) : 0;
-            const oldTs = (ex && typeof ex === 'object') ? (ex.ts || 0) : 0;
-            if (!ex || newTs > oldTs) comp[hid][d] = val;
+            const nTs = (val && typeof val === 'object') ? (val.ts || 0) : 0;
+            const oTs = (ex && typeof ex === 'object') ? (ex.ts || 0) : 0;
+            if (!ex || nTs > oTs) comp[hid][d] = val;
           }
         }
       }
       for (const id of Object.keys(comp)) if (!habitMap.has(id)) delete comp[id];
-      return { habits: [...habitMap.values()], completions: comp, deleted };
+
+      const w = mergeTimedMaps(a.weights, b.weights, a.weightDeleted, b.weightDeleted);
+      const k = mergeTimedMaps(a.kcal, b.kcal, a.kcalDeleted, b.kcalDeleted);
+
+      return {
+        habits: [...habitMap.values()],
+        completions: comp,
+        deleted,
+        weights: w.data, weightDeleted: w.deleted,
+        kcal: k.data, kcalDeleted: k.deleted,
+        settings: mergeSettings(a.settings, b.settings)
+      };
     }
 
     function useHabitSync(token, owner) {
@@ -246,41 +313,25 @@
       const writeTimer = useRef(null);
       const initialised = useRef(false);
 
-      // init: ensure repo, ensure file, merge with local
       useEffect(() => {
         if (!token || !owner) return;
         let alive = true;
         (async () => {
           setLoading(true); setError(null); setRepoStatus('pending');
           try {
-            // 1. ensure repo
             let repo = await ghGetRepo(token, owner, REPO_NAME);
-            if (!repo) {
-              setRepoStatus('creating');
-              repo = await ghCreateRepo(token, REPO_NAME);
-            }
-            if (!repo.private) {
-              throw new Error(`репозиторий ${owner}/${REPO_NAME} существует и публичный — сделай его приватным или удали`);
-            }
+            if (!repo) { setRepoStatus('creating'); repo = await ghCreateRepo(token, REPO_NAME); }
+            if (!repo.private) throw new Error(`репозиторий ${owner}/${REPO_NAME} существует и публичный — сделай его приватным или удали`);
             setRepoStatus('ready');
 
-            // 2. read file
             const file = await ghGetFile(token, owner, REPO_NAME, FILE_PATH);
-
             let merged = stateRef.current;
             if (file) {
               const remote = JSON.parse(file.content);
               merged = mergeStates(stateRef.current, remote);
               lastShaRef.current = file.sha;
             }
-
-            if (alive) {
-              setState(merged);
-              setLastSync(Date.now());
-              initialised.current = true;
-            }
-
-            // 3. write back if file missing or changed
+            if (alive) { setState(merged); setLastSync(Date.now()); initialised.current = true; }
             if (!file) {
               const res = await ghPutFile(token, owner, REPO_NAME, FILE_PATH, JSON.stringify(merged), null);
               lastShaRef.current = res?.content?.sha ?? null;
@@ -289,16 +340,12 @@
               lastShaRef.current = res?.content?.sha ?? null;
               if (alive) setLastSync(Date.now());
             }
-          } catch (e) {
-            if (alive) setError(e.message);
-          } finally {
-            if (alive) setLoading(false);
-          }
+          } catch (e) { if (alive) setError(e.message); }
+          finally { if (alive) setLoading(false); }
         })();
         return () => { alive = false; };
       }, [token, owner]);
 
-      // debounced write: read-modify-write with retry on 409
       useEffect(() => {
         if (!token || !owner || !initialised.current) return;
         if (writeTimer.current) clearTimeout(writeTimer.current);
@@ -316,11 +363,8 @@
               try {
                 const res = await ghPutFile(token, owner, REPO_NAME, FILE_PATH, JSON.stringify(toWrite), cur?.sha ?? null);
                 lastShaRef.current = res?.content?.sha ?? null;
-                if (JSON.stringify(toWrite) !== JSON.stringify(local)) {
-                  setState(toWrite);
-                }
-                setLastSync(Date.now());
-                setError(null);
+                if (JSON.stringify(toWrite) !== JSON.stringify(local)) setState(toWrite);
+                setLastSync(Date.now()); setError(null);
                 break;
               } catch (e) {
                 if (attempt === 0 && (e.status === 409 || e.status === 422)) continue;
@@ -333,7 +377,6 @@
         return () => { if (writeTimer.current) clearTimeout(writeTimer.current); };
       }, [state, token, owner]);
 
-      // poll remote by sha
       useEffect(() => {
         if (!token || !owner) return;
         let alive = true;
@@ -345,21 +388,14 @@
               const remote = JSON.parse(cur.content);
               const merged = mergeStates(stateRef.current, remote);
               lastShaRef.current = cur.sha;
-              if (alive) {
-                setState(merged);
-                setLastSync(Date.now());
-              }
+              if (alive) { setState(merged); setLastSync(Date.now()); }
             }
-          } catch { /* silent, retry next tick */ }
+          } catch {}
         }
         const iv = setInterval(poll, 25000);
         const onVis = () => { if (!document.hidden) poll(); };
         document.addEventListener('visibilitychange', onVis);
-        return () => {
-          alive = false;
-          clearInterval(iv);
-          document.removeEventListener('visibilitychange', onVis);
-        };
+        return () => { alive = false; clearInterval(iv); document.removeEventListener('visibilitychange', onVis); };
       }, [token, owner]);
 
       async function forceSync() {
@@ -367,18 +403,11 @@
         setSyncing(true);
         try {
           const cur = await ghGetFile(token, owner, REPO_NAME, FILE_PATH);
-          let merged = stateRef.current;
-          let sha = null;
-          if (cur) {
-            const remote = JSON.parse(cur.content);
-            merged = mergeStates(stateRef.current, remote);
-            sha = cur.sha;
-          }
+          let merged = stateRef.current, sha = null;
+          if (cur) { merged = mergeStates(stateRef.current, JSON.parse(cur.content)); sha = cur.sha; }
           const res = await ghPutFile(token, owner, REPO_NAME, FILE_PATH, JSON.stringify(merged), sha);
           lastShaRef.current = res?.content?.sha ?? null;
-          setState(merged);
-          setLastSync(Date.now());
-          setError(null);
+          setState(merged); setLastSync(Date.now()); setError(null);
         } catch (e) { setError(e.message); }
         finally { setSyncing(false); }
       }
@@ -391,10 +420,10 @@
     const LS_OWNER = 'habits_gh_owner_v1';
 
     /* ===================== AUTH SCREEN ===================== */
-    function AuthScreen({ onReady }) {
+    function AuthScreen({ onReady, initialError }) {
       const [token, setToken] = useState('');
       const [busy, setBusy] = useState(false);
-      const [err, setErr] = useState(null);
+      const [err, setErr] = useState(initialError || null);
 
       async function submit(e) {
         e.preventDefault();
@@ -406,9 +435,8 @@
           localStorage.setItem(LS_TOKEN, t);
           localStorage.setItem(LS_OWNER, user.login);
           onReady(t, user.login);
-        } catch (e) {
-          setErr(e.message);
-        } finally { setBusy(false); }
+        } catch (e) { setErr(e.message); }
+        finally { setBusy(false); }
       }
 
       return (
@@ -436,8 +464,7 @@
                   <li>отметь scope <span className="font-mono text-emerald-400">repo</span></li>
                   <li>скопируй и вставь сюда</li>
                 </ol>
-                <div className="pt-1">приложение создаст приватный репозиторий <span className="font-mono text-emerald-400">habits-tracker-data</span> и будет хранить данные там.</div>
-                <div>на втором устройстве — тот же токен.</div>
+                <div className="pt-1">токен сохранится в этом браузере — вводить заново не придётся.</div>
               </div>
             </form>
           </div>
@@ -460,7 +487,31 @@
       );
     }
 
-    /* ===================== MINI CALENDAR ===================== */
+    /* ===================== REUSABLE UI ===================== */
+    function PeriodSelector({ value, onChange, options = [7, 30, 90, 365] }) {
+      const labels = { 7: '7д', 30: '30д', 90: '90д', 365: '1г' };
+      return (
+        <div className="flex gap-1 bg-slate-950 rounded-lg p-1">
+          {options.map(o => (
+            <button key={o} onClick={() => onChange(o)}
+              className={`text-[11px] px-2 py-1 rounded transition ${value === o ? 'bg-emerald-500 text-slate-950 font-medium' : 'text-slate-400 hover:text-slate-200'}`}>
+              {labels[o] || o}
+            </button>
+          ))}
+        </div>
+      );
+    }
+
+    function Stat({ label, value, sub }) {
+      return (
+        <div className="bg-slate-900 border border-slate-800 rounded-xl p-3 text-center">
+          <div className="text-xl font-semibold">{value}</div>
+          <div className="text-[10px] text-slate-500 mt-0.5">{label}</div>
+          {sub && <div className="text-[9px] text-slate-600 mt-0.5">{sub}</div>}
+        </div>
+      );
+    }
+
     function MiniCalendar({ habitId, completions, color, days = 14 }) {
       const today = isoDate();
       const cells = [];
@@ -480,17 +531,15 @@
       );
     }
 
-    /* ===================== HEATMAP ===================== */
     function Heatmap({ habitId, completions, today, color, onToggleDate }) {
-      const weeks = 12;
       const grid = useMemo(() => {
         const endWeekStart = getWeekStart(today);
         const out = [];
-        for (let w = weeks - 1; w >= 0; w--) {
-          const weekStart = addDays(endWeekStart, -w * 7);
+        for (let w = 11; w >= 0; w--) {
+          const ws = addDays(endWeekStart, -w * 7);
           const col = [];
           for (let d = 0; d < 7; d++) {
-            const date = addDays(weekStart, d);
+            const date = addDays(ws, d);
             col.push({ date, done: isDone(completions[habitId]?.[date]), future: date > today });
           }
           out.push(col);
@@ -530,17 +579,7 @@
       );
     }
 
-    /* ===================== STAT ===================== */
-    function Stat({ label, value }) {
-      return (
-        <div className="bg-slate-900 border border-slate-800 rounded-xl p-3 text-center">
-          <div className="text-xl font-semibold">{value}</div>
-          <div className="text-[10px] text-slate-500 mt-0.5">{label}</div>
-        </div>
-      );
-    }
-
-    /* ===================== HABIT ROW ===================== */
+    /* ===================== HABITS TAB ===================== */
     function HabitRow({ habit, state, today, onToggle, onOpen }) {
       const color = getColor(habit.color);
       const done = isDone(state.completions[habit.id]?.[today]);
@@ -570,12 +609,11 @@
       );
     }
 
-    /* ===================== HABIT DETAIL ===================== */
     function HabitDetail({ habit, state, today, onBack, onToggleDate, onDelete, onArchive }) {
       const color = getColor(habit.color);
       const streak = currentStreak(habit.id, state.completions, today);
       const best = longestStreak(habit.id, state.completions);
-      const rate = completionRate(habit.id, state.completions, 30);
+      const rate30 = habitCompletionRate(habit.id, state.completions, addDays(today, -29), today);
       const total = totalDone(habit.id, state.completions);
       return (
         <div className="p-4 space-y-4">
@@ -587,7 +625,7 @@
           <div className="grid grid-cols-3 gap-2">
             <Stat label="серия" value={streak} />
             <Stat label="рекорд" value={best} />
-            <Stat label="30 дней" value={Math.round(rate * 100) + '%'} />
+            <Stat label="30 дней" value={Math.round(rate30 * 100) + '%'} />
           </div>
           <div className="bg-slate-900 border border-slate-800 rounded-xl p-3">
             <div className="text-xs text-slate-400 mb-2">12 недель · клик переключает день</div>
@@ -613,7 +651,6 @@
       );
     }
 
-    /* ===================== NEW HABIT MODAL ===================== */
     function NewHabitModal({ onSave, onClose }) {
       const [name, setName] = useState('');
       const [color, setColor] = useState('emerald');
@@ -621,8 +658,7 @@
         e.preventDefault();
         const t = name.trim();
         if (!t) return;
-        const now = Date.now();
-        onSave({ id: crypto.randomUUID(), name: t, color, createdAt: isoDate(), updatedAt: now, archived: false });
+        onSave({ id: crypto.randomUUID(), name: t, color, createdAt: isoDate(), updatedAt: Date.now(), archived: false });
       }
       return (
         <div className="fixed inset-0 bg-black/70 flex items-center justify-center p-4 z-50" onClick={onClose}>
@@ -636,8 +672,7 @@
               {COLOR_KEYS.map(k => (
                 <button key={k} type="button" onClick={() => setColor(k)}
                   style={{
-                    background: COLORS[k].hex,
-                    width: 36, height: 36, borderRadius: '50%',
+                    background: COLORS[k].hex, width: 36, height: 36, borderRadius: '50%',
                     outline: color === k ? '2px solid #fff' : 'none',
                     outlineOffset: 3, cursor: 'pointer', border: 'none'
                   }} />
@@ -654,15 +689,11 @@
       );
     }
 
-    /* ===================== MAIN APP ===================== */
-    function MainApp({ token, owner, onLogout }) {
-      const sync = useHabitSync(token, owner);
+    function HabitsTab({ sync, today }) {
+      const state = sync.state;
       const [view, setView] = useState({ type: 'list' });
       const [showNew, setShowNew] = useState(false);
       const [showArchived, setShowArchived] = useState(false);
-      const [showMenu, setShowMenu] = useState(false);
-      const today = isoDate();
-      const state = sync.state;
 
       const activeHabits = state.habits.filter(h => !h.archived).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
       const archivedHabits = state.habits.filter(h => h.archived);
@@ -680,20 +711,14 @@
           return { ...prev, completions: c };
         });
       }
-      function addHabit(habit) {
-        sync.setState(prev => ({ ...prev, habits: [...prev.habits, habit] }));
-        setShowNew(false);
-      }
+      function addHabit(habit) { sync.setState(prev => ({ ...prev, habits: [...prev.habits, habit] })); setShowNew(false); }
       function deleteHabit(id) {
-        sync.setState(prev => {
-          const now = Date.now();
-          return {
-            ...prev,
-            habits: prev.habits.filter(h => h.id !== id),
-            completions: Object.fromEntries(Object.entries(prev.completions).filter(([k]) => k !== id)),
-            deleted: { ...prev.deleted, [id]: now }
-          };
-        });
+        sync.setState(prev => ({
+          ...prev,
+          habits: prev.habits.filter(h => h.id !== id),
+          completions: Object.fromEntries(Object.entries(prev.completions).filter(([k]) => k !== id)),
+          deleted: { ...prev.deleted, [id]: Date.now() }
+        }));
         setView({ type: 'list' });
       }
       function archiveHabit(id) {
@@ -704,6 +729,571 @@
         setView({ type: 'list' });
       }
 
+      if (view.type === 'detail') {
+        const habit = state.habits.find(h => h.id === view.habitId);
+        if (!habit) { setView({ type: 'list' }); return null; }
+        return <HabitDetail habit={habit} state={state} today={today}
+          onBack={() => setView({ type: 'list' })}
+          onToggleDate={toggleDate}
+          onDelete={deleteHabit}
+          onArchive={archiveHabit} />;
+      }
+
+      return (
+        <div className="p-4 space-y-4 pb-24">
+          {totalActive > 0 && (
+            <div className="bg-slate-900 border border-slate-800 rounded-xl p-3">
+              <div className="flex justify-between text-xs text-slate-400 mb-1.5">
+                <span>{allDone ? '🎉 всё выполнено' : 'сегодня'}</span>
+                <span>{doneToday} / {totalActive}</span>
+              </div>
+              <div className="h-2 rounded-full bg-slate-800 overflow-hidden">
+                <div className="h-full rounded-full transition-all"
+                  style={{ width: `${totalActive ? (doneToday / totalActive) * 100 : 0}%`, background: allDone ? '#34d399' : '#64748b' }} />
+              </div>
+            </div>
+          )}
+
+          {activeHabits.length === 0 && archivedHabits.length === 0 && (
+            <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 text-center">
+              <div className="text-slate-400 text-sm">пока пусто</div>
+              <div className="text-slate-600 text-xs mt-1">нажми + чтобы создать первую привычку</div>
+            </div>
+          )}
+
+          <div className="space-y-2">
+            {activeHabits.map(h => (
+              <HabitRow key={h.id} habit={h} state={state} today={today}
+                onToggle={id => toggleDate(id, today)}
+                onOpen={() => setView({ type: 'detail', habitId: h.id })} />
+            ))}
+          </div>
+
+          {archivedHabits.length > 0 && (
+            <div>
+              <button onClick={() => setShowArchived(v => !v)} className="text-xs text-slate-500 hover:text-slate-300">
+                {showArchived ? '▾' : '▸'} архив ({archivedHabits.length})
+              </button>
+              {showArchived && (
+                <div className="space-y-2 mt-2">
+                  {archivedHabits.map(h => (
+                    <HabitRow key={h.id} habit={h} state={state} today={today}
+                      onToggle={id => toggleDate(id, today)}
+                      onOpen={() => setView({ type: 'detail', habitId: h.id })} />
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          <button onClick={() => setShowNew(true)} aria-label="добавить привычку"
+            className="fixed right-5 bg-emerald-500 text-slate-950 rounded-full shadow-lg active:scale-95 transition"
+            style={{
+              width: 60, height: 60, bottom: 'max(84px, calc(env(safe-area-inset-bottom) + 64px))',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              fontSize: 30, fontWeight: 700, border: 'none', cursor: 'pointer', zIndex: 40
+            }}>
+            +
+          </button>
+          {showNew && <NewHabitModal onSave={addHabit} onClose={() => setShowNew(false)} />}
+        </div>
+      );
+    }
+
+    /* ===================== WEIGHT VIEW ===================== */
+    function WeightChart({ entries, color = '#34d399' }) {
+      if (entries.length < 2) {
+        return <div className="text-slate-600 text-xs py-8 text-center">
+          {entries.length === 1 ? 'нужно ≥2 взвешиваний' : 'нет данных за период'}
+        </div>;
+      }
+      const W = 320, H = 180, PL = 40, PR = 10, PT = 12, PB = 22;
+      const pw = W - PL - PR, ph = H - PT - PB;
+      const all = entries.flatMap(p => [p.kg, p.ma].filter(v => v !== undefined));
+      const minY = Math.min(...all) - 0.5, maxY = Math.max(...all) + 0.5;
+      const rY = Math.max(0.5, maxY - minY);
+      const x = i => PL + (i / (entries.length - 1)) * pw;
+      const y = kg => PT + (1 - (kg - minY) / rY) * ph;
+      const rawPath = entries.map((p, i) => `${i ? 'L' : 'M'} ${x(i).toFixed(1)} ${y(p.kg).toFixed(1)}`).join(' ');
+      const maPts = entries.map((p, i) => p.ma !== undefined ? { i, v: p.ma } : null).filter(Boolean);
+      const maPath = maPts.length >= 2 ? maPts.map((p, k) => `${k ? 'L' : 'M'} ${x(p.i).toFixed(1)} ${y(p.v).toFixed(1)}`).join(' ') : '';
+      const ticks = [minY, minY + rY / 2, maxY];
+      return (
+        <svg viewBox={`0 0 ${W} ${H}`} className="w-full">
+          {ticks.map((v, i) => (
+            <g key={i}>
+              <line x1={PL} x2={W - PR} y1={y(v)} y2={y(v)} stroke="#1e293b" strokeDasharray="2 4" />
+              <text x={PL - 4} y={y(v) + 3} textAnchor="end" fontSize="9" fill="#64748b">{v.toFixed(1)}</text>
+            </g>
+          ))}
+          <path d={rawPath} fill="none" stroke="#475569" strokeWidth="1.2" />
+          {entries.map((p, i) => <circle key={p.date} cx={x(i)} cy={y(p.kg)} r={2} fill="#94a3b8" />)}
+          {maPath && <path d={maPath} fill="none" stroke={color} strokeWidth="2.2" />}
+          <text x={PL} y={H - 4} fontSize="9" fill="#64748b">{entries[0].date.slice(5)}</text>
+          <text x={W - PR} y={H - 4} textAnchor="end" fontSize="9" fill="#64748b">{entries[entries.length - 1].date.slice(5)}</text>
+        </svg>
+      );
+    }
+
+    function WeightTab({ sync, today }) {
+      const [period, setPeriod] = useState(30);
+      const [input, setInput] = useState('');
+      const [date, setDate] = useState(today);
+      const [err, setErr] = useState(null);
+      const from = addDays(today, -(period - 1));
+      const all = weightSeriesInRange(sync.state.weights, addDays(today, -3650), today);
+      const entries = weightSeriesInRange(sync.state.weights, from, today);
+      const withMA = weightMovingAvg(entries, 7);
+      const slope = slopePerWeek(entries);
+      const latest = all.length ? all[all.length - 1].kg : null;
+      const first = entries.length ? entries[0].kg : null;
+      const change = (latest != null && first != null && entries.length >= 2) ? latest - first : null;
+
+      async function add() {
+        const kg = Number(input.replace(',', '.'));
+        if (!Number.isFinite(kg) || kg < 20 || kg > 400) { setErr('вес 20–400 кг'); return; }
+        sync.setState(prev => ({
+          ...prev,
+          weights: { ...prev.weights, [date]: { kg, ts: Date.now() } },
+          weightDeleted: Object.fromEntries(Object.entries(prev.weightDeleted || {}).filter(([d]) => d !== date))
+        }));
+        setInput(''); setErr(null);
+      }
+      async function remove(d) {
+        if (!confirm(`удалить запись за ${d}?`)) return;
+        sync.setState(prev => {
+          const w = { ...prev.weights }; delete w[d];
+          return { ...prev, weights: w, weightDeleted: { ...(prev.weightDeleted || {}), [d]: Date.now() } };
+        });
+      }
+
+      const recent = [...all].reverse().slice(0, 10);
+
+      return (
+        <div className="p-4 space-y-4 pb-24">
+          <div className="flex items-center justify-between">
+            <h2 className="text-base font-semibold">вес</h2>
+            <PeriodSelector value={period} onChange={setPeriod} />
+          </div>
+
+          <div className="bg-slate-900 border border-slate-800 rounded-xl p-3">
+            {withMA.length >= 2
+              ? <WeightChart entries={withMA} />
+              : <div className="text-slate-600 text-xs py-8 text-center">внеси ≥2 взвешивания за период</div>}
+          </div>
+
+          {entries.length > 0 && (
+            <div className="grid grid-cols-3 gap-2">
+              <Stat label="текущий" value={latest != null ? latest.toFixed(1) : '—'} sub="кг" />
+              <Stat label={`Δ ${period}д`} value={change != null ? (change > 0 ? '+' : '') + change.toFixed(1) : '—'} sub="кг" />
+              <Stat label="тренд" value={slope != null ? (slope > 0 ? '+' : '') + slope.toFixed(2) : '—'} sub="кг/нед" />
+            </div>
+          )}
+
+          <div className="bg-slate-900 border border-slate-800 rounded-xl p-3 space-y-2">
+            <div className="text-xs text-slate-400">добавить взвешивание</div>
+            <div className="flex items-center gap-2">
+              <input type="date" value={date} max={today} onChange={e => setDate(e.target.value)}
+                className="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5 text-xs" />
+              <input placeholder="кг" value={input} inputMode="decimal" onChange={e => setInput(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && add()}
+                className="flex-1 bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-sm" />
+              <button onClick={add} className="bg-emerald-500 text-slate-950 font-medium rounded-lg px-3 py-1.5 text-sm active:scale-95 transition">+</button>
+            </div>
+            {err && <div className="text-amber-400 text-[11px]">{err}</div>}
+          </div>
+
+          {recent.length > 0 && (
+            <div className="bg-slate-900 border border-slate-800 rounded-xl p-3">
+              <div className="text-xs text-slate-400 mb-2">последние записи</div>
+              <ul className="space-y-1 text-sm">
+                {recent.map(e => (
+                  <li key={e.date} className="flex items-center justify-between py-1">
+                    <span className="text-slate-400 text-xs">{e.date}</span>
+                    <span className="font-medium">{e.kg.toFixed(1)} кг</span>
+                    <button onClick={() => remove(e.date)} className="text-slate-600 hover:text-red-400 text-xs px-1">✕</button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    /* ===================== KCAL VIEW ===================== */
+    function KcalChart({ entries, target, from, to }) {
+      if (!entries.length) {
+        return <div className="text-slate-600 text-xs py-8 text-center">нет данных за период</div>;
+      }
+      const W = 320, H = 180, PL = 40, PR = 10, PT = 12, PB = 22;
+      const pw = W - PL - PR, ph = H - PT - PB;
+      const maxY = Math.max(target, ...entries.map(e => e.value)) * 1.1;
+      const byDate = new Map(entries.map(e => [e.date, e.value]));
+      const days = [];
+      let cur = from;
+      while (cur <= to) { days.push(cur); cur = addDays(cur, 1); }
+      const bw = pw / Math.max(1, days.length);
+      const y = v => PT + (1 - v / maxY) * ph;
+      const yTarget = y(target);
+      return (
+        <svg viewBox={`0 0 ${W} ${H}`} className="w-full">
+          <line x1={PL} x2={W - PR} y1={yTarget} y2={yTarget} stroke="#fbbf24" strokeDasharray="3 3" opacity={0.6} />
+          <text x={W - PR} y={yTarget - 3} textAnchor="end" fontSize="8" fill="#fbbf24">{target}</text>
+          {[0, maxY / 2, maxY].map((v, i) => (
+            <g key={i}>
+              <line x1={PL} x2={W - PR} y1={y(v)} y2={y(v)} stroke="#1e293b" strokeDasharray="2 4" />
+              <text x={PL - 4} y={y(v) + 3} textAnchor="end" fontSize="9" fill="#64748b">{Math.round(v)}</text>
+            </g>
+          ))}
+          {days.map((d, i) => {
+            const v = byDate.get(d);
+            if (!v) return null;
+            const h = (v / maxY) * ph;
+            const over = v > target;
+            return (
+              <rect key={d}
+                x={PL + i * bw + 1} y={PT + ph - h}
+                width={Math.max(1, bw - 2)} height={h}
+                fill={over ? '#f87171' : '#34d399'} opacity={0.85} rx={1} />
+            );
+          })}
+          <text x={PL} y={H - 4} fontSize="9" fill="#64748b">{from.slice(5)}</text>
+          <text x={W - PR} y={H - 4} textAnchor="end" fontSize="9" fill="#64748b">{to.slice(5)}</text>
+        </svg>
+      );
+    }
+
+    function KcalTab({ sync, today }) {
+      const [period, setPeriod] = useState(30);
+      const [input, setInput] = useState('');
+      const [date, setDate] = useState(today);
+      const [err, setErr] = useState(null);
+      const target = sync.state.settings?.kcalTarget || 2200;
+      const from = addDays(today, -(period - 1));
+      const all = kcalSeriesInRange(sync.state.kcal, addDays(today, -3650), today);
+      const entries = kcalSeriesInRange(sync.state.kcal, from, today);
+      const todayVal = sync.state.kcal[today]?.value;
+      const avg7 = (() => {
+        const e = kcalSeriesInRange(sync.state.kcal, addDays(today, -6), today);
+        return e.length ? Math.round(e.reduce((a, x) => a + x.value, 0) / e.length) : null;
+      })();
+      const avgPeriod = entries.length ? Math.round(entries.reduce((a, x) => a + x.value, 0) / entries.length) : null;
+      const onTargetDays = entries.filter(e => Math.abs(e.value - target) <= target * 0.1).length;
+
+      async function add() {
+        const v = Number(input.replace(/\s/g, ''));
+        if (!Number.isFinite(v) || v < 500 || v > 15000) { setErr('ккал 500–15000'); return; }
+        sync.setState(prev => ({
+          ...prev,
+          kcal: { ...prev.kcal, [date]: { value: v, ts: Date.now() } },
+          kcalDeleted: Object.fromEntries(Object.entries(prev.kcalDeleted || {}).filter(([d]) => d !== date))
+        }));
+        setInput(''); setErr(null);
+      }
+      async function remove(d) {
+        if (!confirm(`удалить запись за ${d}?`)) return;
+        sync.setState(prev => {
+          const k = { ...prev.kcal }; delete k[d];
+          return { ...prev, kcal: k, kcalDeleted: { ...(prev.kcalDeleted || {}), [d]: Date.now() } };
+        });
+      }
+
+      const recent = [...all].reverse().slice(0, 10);
+
+      return (
+        <div className="p-4 space-y-4 pb-24">
+          <div className="flex items-center justify-between">
+            <h2 className="text-base font-semibold">калории</h2>
+            <PeriodSelector value={period} onChange={setPeriod} />
+          </div>
+
+          <div className="bg-slate-900 border border-slate-800 rounded-xl p-3">
+            <KcalChart entries={entries} target={target} from={from} to={today} />
+            <div className="text-[10px] text-slate-500 text-center mt-1">цель {target} ккал — пунктир</div>
+          </div>
+
+          <div className="grid grid-cols-3 gap-2">
+            <Stat label="сегодня" value={todayVal ?? '—'} sub="ккал" />
+            <Stat label="среднее 7д" value={avg7 ?? '—'} sub="ккал" />
+            <Stat label={`среднее ${period}д`} value={avgPeriod ?? '—'} sub={`${onTargetDays} в цель`} />
+          </div>
+
+          <div className="bg-slate-900 border border-slate-800 rounded-xl p-3 space-y-2">
+            <div className="text-xs text-slate-400">добавить запись</div>
+            <div className="flex items-center gap-2">
+              <input type="date" value={date} max={today} onChange={e => setDate(e.target.value)}
+                className="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5 text-xs" />
+              <input placeholder="ккал" value={input} inputMode="numeric" onChange={e => setInput(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && add()}
+                className="flex-1 bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-sm" />
+              <button onClick={add} className="bg-emerald-500 text-slate-950 font-medium rounded-lg px-3 py-1.5 text-sm active:scale-95 transition">+</button>
+            </div>
+            {err && <div className="text-amber-400 text-[11px]">{err}</div>}
+          </div>
+
+          {recent.length > 0 && (
+            <div className="bg-slate-900 border border-slate-800 rounded-xl p-3">
+              <div className="text-xs text-slate-400 mb-2">последние записи</div>
+              <ul className="space-y-1 text-sm">
+                {recent.map(e => (
+                  <li key={e.date} className="flex items-center justify-between py-1">
+                    <span className="text-slate-400 text-xs">{e.date}</span>
+                    <span className="font-medium">{e.value} ккал</span>
+                    <button onClick={() => remove(e.date)} className="text-slate-600 hover:text-red-400 text-xs px-1">✕</button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    /* ===================== HEALTH TAB (weight + kcal) ===================== */
+    function HealthTab({ sync, today }) {
+      const [segment, setSegment] = useState('weight');
+      return (
+        <div className="p-4 pb-0">
+          <div className="flex gap-1 bg-slate-950 rounded-lg p-1 mb-2 max-w-xs">
+            <button onClick={() => setSegment('weight')}
+              className={`flex-1 text-xs py-1.5 rounded transition ${segment === 'weight' ? 'bg-slate-800 text-emerald-400' : 'text-slate-500'}`}>
+              ⚖ вес
+            </button>
+            <button onClick={() => setSegment('kcal')}
+              className={`flex-1 text-xs py-1.5 rounded transition ${segment === 'kcal' ? 'bg-slate-800 text-emerald-400' : 'text-slate-500'}`}>
+              🔥 ккал
+            </button>
+          </div>
+          {segment === 'weight' ? <WeightTab sync={sync} today={today} /> : <KcalTab sync={sync} today={today} />}
+        </div>
+      );
+    }
+
+    /* ===================== OVERVIEW TAB ===================== */
+    function OverviewTab({ sync, today }) {
+      const [period, setPeriod] = useState(30);
+      const from = addDays(today, -(period - 1));
+      const state = sync.state;
+      const activeHabits = state.habits.filter(h => !h.archived);
+
+      const totalCompletions = activeHabits.reduce((sum, h) => sum + habitCompletionRate(h.id, state.completions, from, today), 0);
+      const avgRate = activeHabits.length ? totalCompletions / activeHabits.length : 0;
+
+      const weightEntries = weightSeriesInRange(state.weights, from, today);
+      const weightFirst = weightEntries[0]?.kg ?? null;
+      const weightLast = weightEntries[weightEntries.length - 1]?.kg ?? null;
+      const weightDelta = (weightFirst != null && weightLast != null && weightEntries.length >= 2) ? weightLast - weightFirst : null;
+
+      const kcalEntries = kcalSeriesInRange(state.kcal, from, today);
+      const kcalAvg = kcalEntries.length ? Math.round(kcalEntries.reduce((a, x) => a + x.value, 0) / kcalEntries.length) : null;
+      const kcalTarget = state.settings?.kcalTarget || 2200;
+      const kcalInTarget = kcalEntries.filter(e => Math.abs(e.value - kcalTarget) <= kcalTarget * 0.1).length;
+
+      return (
+        <div className="p-4 space-y-4 pb-24">
+          <div className="flex items-center justify-between">
+            <h2 className="text-base font-semibold">обзор</h2>
+            <PeriodSelector value={period} onChange={setPeriod} />
+          </div>
+
+          <div className="text-xs text-slate-500">
+            период: {from} → {today} ({period} {plural(period, 'день', 'дня', 'дней')})
+          </div>
+
+          <div className="grid grid-cols-2 gap-2">
+            <div className="bg-slate-900 border border-slate-800 rounded-xl p-3">
+              <div className="text-[10px] text-slate-500 mb-1">привычки</div>
+              <div className="text-lg font-semibold">{activeHabits.length ? Math.round(avgRate * 100) + '%' : '—'}</div>
+              <div className="text-[10px] text-slate-600">средний completion rate</div>
+            </div>
+            <div className="bg-slate-900 border border-slate-800 rounded-xl p-3">
+              <div className="text-[10px] text-slate-500 mb-1">всего отметок</div>
+              <div className="text-lg font-semibold">{Math.round(totalCompletions)}</div>
+              <div className="text-[10px] text-slate-600">за период</div>
+            </div>
+            <div className="bg-slate-900 border border-slate-800 rounded-xl p-3">
+              <div className="text-[10px] text-slate-500 mb-1">вес Δ</div>
+              <div className={`text-lg font-semibold ${weightDelta == null ? '' : weightDelta < 0 ? 'text-emerald-400' : weightDelta > 0 ? 'text-amber-400' : ''}`}>
+                {weightDelta == null ? '—' : (weightDelta > 0 ? '+' : '') + weightDelta.toFixed(1)}
+              </div>
+              <div className="text-[10px] text-slate-600">кг за период · {weightEntries.length} взвеш.</div>
+            </div>
+            <div className="bg-slate-900 border border-slate-800 rounded-xl p-3">
+              <div className="text-[10px] text-slate-500 mb-1">ккал среднее</div>
+              <div className="text-lg font-semibold">{kcalAvg ?? '—'}</div>
+              <div className="text-[10px] text-slate-600">{kcalInTarget}/{kcalEntries.length} в цель</div>
+            </div>
+          </div>
+
+          {activeHabits.length > 0 && (
+            <div className="bg-slate-900 border border-slate-800 rounded-xl p-3 space-y-2">
+              <div className="text-xs text-slate-400 mb-1">по привычкам</div>
+              {activeHabits.map(h => {
+                const rate = habitCompletionRate(h.id, state.completions, from, today);
+                const color = getColor(h.color);
+                const cur = currentStreak(h.id, state.completions, today);
+                return (
+                  <div key={h.id}>
+                    <div className="flex justify-between text-[11px] mb-0.5">
+                      <span className="truncate">{h.name}</span>
+                      <span className="text-slate-500 shrink-0 ml-2">{Math.round(rate * 100)}% · 🔥{cur}</span>
+                    </div>
+                    <div className="h-1.5 rounded-full bg-slate-800 overflow-hidden">
+                      <div className="h-full rounded-full transition-all"
+                        style={{ width: `${rate * 100}%`, background: color.hex }} />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {weightEntries.length >= 2 && (
+            <div className="bg-slate-900 border border-slate-800 rounded-xl p-3">
+              <div className="text-xs text-slate-400 mb-2">вес за период</div>
+              <WeightChart entries={weightMovingAvg(weightEntries, 7)} />
+            </div>
+          )}
+
+          {kcalEntries.length > 0 && (
+            <div className="bg-slate-900 border border-slate-800 rounded-xl p-3">
+              <div className="text-xs text-slate-400 mb-2">калории за период</div>
+              <KcalChart entries={kcalEntries} target={kcalTarget} from={from} to={today} />
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    /* ===================== SETTINGS TAB ===================== */
+    function SettingsTab({ sync, token, owner, onLogout }) {
+      const [showToken, setShowToken] = useState(false);
+      const [copied, setCopied] = useState(false);
+      const [kcalInput, setKcalInput] = useState(String(sync.state.settings?.kcalTarget || 2200));
+      const [kcalSaved, setKcalSaved] = useState(false);
+
+      function copyToken() {
+        navigator.clipboard.writeText(token).then(() => {
+          setCopied(true); setTimeout(() => setCopied(false), 1500);
+        });
+      }
+
+      function saveKcalTarget() {
+        const v = Number(kcalInput);
+        if (!Number.isFinite(v) || v < 500 || v > 15000) return;
+        sync.setState(prev => ({
+          ...prev,
+          settings: { ...prev.settings, kcalTarget: v, updatedAt: Date.now() }
+        }));
+        setKcalSaved(true); setTimeout(() => setKcalSaved(false), 1500);
+      }
+
+      const habitCount = sync.state.habits.length;
+      const weightCount = Object.keys(sync.state.weights || {}).length;
+      const kcalCount = Object.keys(sync.state.kcal || {}).length;
+
+      return (
+        <div className="p-4 space-y-4 pb-24">
+          <h2 className="text-base font-semibold">настройки</h2>
+
+          <section className="bg-slate-900 border border-slate-800 rounded-xl p-3 space-y-2">
+            <div className="text-xs text-slate-400">аккаунт</div>
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="text-sm font-medium">@{owner}</div>
+                <a href={`https://github.com/${owner}/${REPO_NAME}`} target="_blank" rel="noopener"
+                  className="text-[11px] text-sky-400 hover:underline">
+                  {owner}/{REPO_NAME} ↗
+                </a>
+              </div>
+              <span className="text-[10px] text-emerald-500">● подключён</span>
+            </div>
+          </section>
+
+          <section className="bg-slate-900 border border-slate-800 rounded-xl p-3 space-y-2">
+            <div className="text-xs text-slate-400">токен github</div>
+            <div className="flex items-center gap-2">
+              <code className="flex-1 text-xs font-mono text-slate-300 break-all">
+                {showToken ? token : `${token.slice(0, 8)}••••••••${token.slice(-4)}`}
+              </code>
+              <button onClick={() => setShowToken(v => !v)}
+                className="text-[11px] text-slate-400 hover:text-slate-200 px-2 py-1">
+                {showToken ? 'скрыть' : 'показать'}
+              </button>
+              <button onClick={copyToken}
+                className="text-[11px] text-emerald-400 hover:text-emerald-300 px-2 py-1">
+                {copied ? '✓' : 'копировать'}
+              </button>
+            </div>
+            <div className="text-[10px] text-slate-600">
+              токен хранится в localStorage этого браузера. при следующем открытии сайта вводить не нужно.
+            </div>
+          </section>
+
+          <section className="bg-slate-900 border border-slate-800 rounded-xl p-3 space-y-2">
+            <div className="text-xs text-slate-400">синхронизация</div>
+            <div className="flex items-center justify-between text-xs">
+              <span className="text-slate-400">статус</span>
+              <span className={sync.error ? 'text-amber-400' : 'text-emerald-400'}>
+                {sync.error ? '⚠ ' + sync.error : sync.syncing ? '↻ синхронизация…' : '✓ синхронизировано'}
+              </span>
+            </div>
+            <div className="flex items-center justify-between text-xs">
+              <span className="text-slate-400">последняя</span>
+              <span className="text-slate-300">{sync.lastSync ? relativeTime(sync.lastSync) + ' назад' : '—'}</span>
+            </div>
+            <button onClick={sync.forceSync} disabled={sync.syncing}
+              className="w-full bg-slate-800 hover:bg-slate-700 rounded-lg py-2 text-sm transition disabled:opacity-50">
+              синхронизировать сейчас
+            </button>
+          </section>
+
+          <section className="bg-slate-900 border border-slate-800 rounded-xl p-3 space-y-2">
+            <div className="text-xs text-slate-400">цель по калориям</div>
+            <div className="flex items-center gap-2">
+              <input type="number" value={kcalInput} onChange={e => setKcalInput(e.target.value)}
+                className="flex-1 bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-sm" />
+              <span className="text-xs text-slate-500">ккал</span>
+              <button onClick={saveKcalTarget}
+                className="bg-emerald-500 text-slate-950 font-medium rounded-lg px-3 py-1.5 text-sm active:scale-95 transition">
+                {kcalSaved ? '✓' : 'сохранить'}
+              </button>
+            </div>
+            <div className="text-[10px] text-slate-600">используется в графике калорий и в обзоре</div>
+          </section>
+
+          <section className="bg-slate-900 border border-slate-800 rounded-xl p-3 space-y-1">
+            <div className="text-xs text-slate-400 mb-1">данные</div>
+            <div className="flex justify-between text-xs"><span className="text-slate-400">привычек</span><span>{habitCount}</span></div>
+            <div className="flex justify-between text-xs"><span className="text-slate-400">взвешиваний</span><span>{weightCount}</span></div>
+            <div className="flex justify-between text-xs"><span className="text-slate-400">записей калорий</span><span>{kcalCount}</span></div>
+          </section>
+
+          <button onClick={onLogout}
+            className="w-full bg-red-950/40 border border-red-900/60 text-red-300 hover:bg-red-950/60 rounded-xl py-3 text-sm transition">
+            отключить аккаунт
+          </button>
+          <p className="text-[10px] text-slate-600 text-center leading-relaxed">
+            отключение очистит токен в этом браузере. данные в репозитории останутся.
+          </p>
+        </div>
+      );
+    }
+
+    /* ===================== MAIN APP ===================== */
+    const TABS = [
+      { id: 'habits', label: 'привычки', icon: '◐' },
+      { id: 'health', label: 'здоровье', icon: '⚖' },
+      { id: 'overview', label: 'обзор', icon: '☷' },
+      { id: 'settings', label: 'ещё', icon: '⚙' }
+    ];
+
+    function MainApp({ token, owner, onLogout }) {
+      const sync = useHabitSync(token, owner);
+      const [tab, setTab] = useState('habits');
+      const today = isoDate();
+
       if (sync.loading) {
         return (
           <div className="min-h-full flex flex-col items-center justify-center text-slate-500 text-sm gap-2">
@@ -713,114 +1303,42 @@
         );
       }
 
-      if (view.type === 'detail') {
-        const habit = state.habits.find(h => h.id === view.habitId);
-        if (!habit) { setView({ type: 'list' }); return null; }
-        return (
-          <div className="min-h-full max-w-md mx-auto">
-            <HabitDetail habit={habit} state={state} today={today}
-              onBack={() => setView({ type: 'list' })}
-              onToggleDate={toggleDate}
-              onDelete={deleteHabit}
-              onArchive={archiveHabit} />
-          </div>
-        );
-      }
-
       return (
-        <div className="min-h-full max-w-md mx-auto pb-24">
-          <div className="p-4 space-y-4">
-            <div className="flex items-center justify-between">
-              <h1 className="text-xl font-semibold">привычки</h1>
-              <div className="flex items-center gap-1">
-                <SyncBadge syncing={sync.syncing} lastSync={sync.lastSync} error={sync.error} onSync={sync.forceSync} />
-                <div className="relative">
-                  <button onClick={() => setShowMenu(v => !v)}
-                    className="text-slate-400 hover:text-slate-200 text-lg px-2 py-1">⋯</button>
-                  {showMenu && (
-                    <div className="absolute right-0 top-9 bg-slate-900 border border-slate-800 rounded-lg shadow-lg z-30 w-52">
-                      <a href={`https://github.com/${owner}/${REPO_NAME}`} target="_blank" rel="noopener"
-                        onClick={() => setShowMenu(false)}
-                        className="block text-left text-xs px-3 py-2 hover:bg-slate-800 rounded-t-lg text-slate-300">
-                        открыть репозиторий
-                      </a>
-                      <button onClick={() => { setShowMenu(false); onLogout(); }}
-                        className="w-full text-left text-xs px-3 py-2 hover:bg-slate-800 rounded-b-lg text-red-300">
-                        отключить аккаунт
-                      </button>
-                    </div>
-                  )}
-                </div>
-              </div>
+        <div className="min-h-full max-w-md mx-auto">
+          <div className="flex items-center justify-between p-4 pb-2">
+            <h1 className="text-lg font-semibold">
+              {tab === 'habits' ? 'привычки' : tab === 'health' ? 'здоровье' : tab === 'overview' ? 'обзор' : 'настройки'}
+            </h1>
+            <div className="flex items-center gap-1">
+              <SyncBadge syncing={sync.syncing} lastSync={sync.lastSync} error={sync.error} onSync={sync.forceSync} />
             </div>
+          </div>
 
-            {sync.error && (
-              <div className="bg-amber-950/40 border border-amber-900/60 text-amber-200 text-xs rounded-lg px-3 py-2">
-                синхронизация: {sync.error}
-              </div>
-            )}
+          {sync.error && (
+            <div className="mx-4 mb-2 bg-amber-950/40 border border-amber-900/60 text-amber-200 text-xs rounded-lg px-3 py-2">
+              {sync.error}
+            </div>
+          )}
 
-            {totalActive > 0 && (
-              <div className="bg-slate-900 border border-slate-800 rounded-xl p-3">
-                <div className="flex justify-between text-xs text-slate-400 mb-1.5">
-                  <span>{allDone ? '🎉 всё выполнено' : 'сегодня'}</span>
-                  <span>{doneToday} / {totalActive}</span>
-                </div>
-                <div className="h-2 rounded-full bg-slate-800 overflow-hidden">
-                  <div className="h-full rounded-full transition-all"
-                    style={{ width: `${totalActive ? (doneToday / totalActive) * 100 : 0}%`, background: allDone ? '#34d399' : '#64748b' }} />
-                </div>
-              </div>
-            )}
+          <div className="pb-20">
+            {tab === 'habits' && <HabitsTab sync={sync} today={today} />}
+            {tab === 'health' && <HealthTab sync={sync} today={today} />}
+            {tab === 'overview' && <OverviewTab sync={sync} today={today} />}
+            {tab === 'settings' && <SettingsTab sync={sync} token={token} owner={owner} onLogout={onLogout} />}
+          </div>
 
-            {activeHabits.length === 0 && archivedHabits.length === 0 && (
-              <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 text-center">
-                <div className="text-slate-400 text-sm">пока пусто</div>
-                <div className="text-slate-600 text-xs mt-1">нажми + чтобы создать первую привычку</div>
-              </div>
-            )}
-
-            <div className="space-y-2">
-              {activeHabits.map(h => (
-                <HabitRow key={h.id} habit={h} state={state} today={today}
-                  onToggle={id => toggleDate(id, today)}
-                  onOpen={() => setView({ type: 'detail', habitId: h.id })} />
+          <nav className="fixed bottom-0 left-0 right-0 border-t border-slate-800 bg-slate-950/95 backdrop-blur z-30"
+            style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}>
+            <div className="max-w-md mx-auto grid grid-cols-4">
+              {TABS.map(t => (
+                <button key={t.id} onClick={() => setTab(t.id)}
+                  className={`py-3 text-[11px] flex flex-col items-center gap-0.5 transition ${tab === t.id ? 'text-emerald-400' : 'text-slate-500'}`}>
+                  <span className="text-base leading-none">{t.icon}</span>
+                  {t.label}
+                </button>
               ))}
             </div>
-
-            {archivedHabits.length > 0 && (
-              <div>
-                <button onClick={() => setShowArchived(v => !v)} className="text-xs text-slate-500 hover:text-slate-300">
-                  {showArchived ? '▾' : '▸'} архив ({archivedHabits.length})
-                </button>
-                {showArchived && (
-                  <div className="space-y-2 mt-2">
-                    {archivedHabits.map(h => (
-                      <HabitRow key={h.id} habit={h} state={state} today={today}
-                        onToggle={id => toggleDate(id, today)}
-                        onOpen={() => setView({ type: 'detail', habitId: h.id })} />
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-
-            <p className="text-[10px] text-slate-600 text-center leading-relaxed pt-2">
-              данные — в приватном репозитории <span className="font-mono">{owner}/{REPO_NAME}</span> на твоём github
-            </p>
-          </div>
-
-          <button onClick={() => setShowNew(true)} aria-label="добавить привычку"
-            className="fixed right-5 bg-emerald-500 text-slate-950 rounded-full shadow-lg active:scale-95 transition"
-            style={{
-              width: 60, height: 60, bottom: 'max(20px, env(safe-area-inset-bottom))',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              fontSize: 30, fontWeight: 700, border: 'none', cursor: 'pointer'
-            }}>
-            +
-          </button>
-
-          {showNew && <NewHabitModal onSave={addHabit} onClose={() => setShowNew(false)} />}
+          </nav>
         </div>
       );
     }
@@ -830,6 +1348,7 @@
       const [token, setToken] = useState(null);
       const [owner, setOwner] = useState(null);
       const [ready, setReady] = useState(false);
+      const [authError, setAuthError] = useState(null);
 
       useEffect(() => {
         const t = localStorage.getItem(LS_TOKEN);
@@ -846,13 +1365,12 @@
       }
 
       if (!ready) return <div className="min-h-full flex items-center justify-center text-slate-500 text-sm">загрузка…</div>;
-      if (!token || !owner) return <AuthScreen onReady={(t, o) => { setToken(t); setOwner(o); }} />;
+      if (!token || !owner) return <AuthScreen onReady={(t, o) => { setToken(t); setOwner(o); }} initialError={authError} />;
       return <MainApp token={token} owner={owner} onLogout={logout} />;
     }
 
     ReactDOM.createRoot(document.getElementById('root')).render(<App />);
 
-    /* ===================== SERVICE WORKER ===================== */
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', () => {
         navigator.serviceWorker.register('service-worker.js').catch(() => {});
