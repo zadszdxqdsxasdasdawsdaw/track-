@@ -43,6 +43,7 @@
     ::-webkit-scrollbar-track { background: #0a0a0a; }
     ::-webkit-scrollbar-thumb { background: #262626; border-radius: 4px; }
     ::-webkit-scrollbar-thumb:hover { background: #404040; }
+    input[type="date"] { min-height: 38px; }
   </style>
 </head>
 <body>
@@ -791,10 +792,10 @@
           {subTab === 'weight' && (
             <div className="bg-panel border border-border rounded-2xl p-5 space-y-6">
               <h3 className="text-[11px] font-medium text-textMuted uppercase tracking-wider">Дневник веса</h3>
-              <div className="flex flex-col sm:flex-row gap-3">
-                <input type="date" value={wDate} onChange={e=>setWDate(e.target.value)} className="w-full sm:w-auto bg-base border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-accent" />
-                <div className="flex gap-2 flex-1">
-                  <input placeholder="Вес (кг)" value={wVal} onChange={e=>setWVal(e.target.value)} type="number" className="flex-1 w-full min-w-0 bg-base border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-accent" />
+              <div className="flex flex-col gap-2">
+                <input type="date" value={wDate} onChange={e=>setWDate(e.target.value)} className="w-full bg-base border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-accent" />
+                <div className="flex gap-2">
+                  <input placeholder="Вес (кг)" value={wVal} onChange={e=>setWVal(e.target.value)} type="number" className="flex-1 min-w-0 bg-base border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-accent" />
                   <button onClick={addWeight} className="bg-accent text-base px-6 rounded-lg font-medium shrink-0">ОК</button>
                 </div>
               </div>
@@ -816,10 +817,10 @@
           {subTab === 'kcal' && (
             <div className="bg-panel border border-border rounded-2xl p-5 space-y-6">
               <h3 className="text-[11px] font-medium text-textMuted uppercase tracking-wider">Дневник калорий</h3>
-              <div className="flex flex-col gap-3">
-                <div className="flex flex-col sm:flex-row gap-2">
-                  <input type="date" value={kDate} onChange={e=>setKDate(e.target.value)} className="w-full sm:w-auto bg-base border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-accent" />
-                  <select value={kDesc} onChange={e=>setKDesc(e.target.value)} className="w-full sm:w-auto bg-base border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-accent">
+              <div className="flex flex-col gap-2">
+                <div className="flex gap-2">
+                  <input type="date" value={kDate} onChange={e=>setKDate(e.target.value)} className="w-full bg-base border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-accent" />
+                  <select value={kDesc} onChange={e=>setKDesc(e.target.value)} className="w-full bg-base border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-accent">
                     <option>Завтрак</option><option>Обед</option><option>Ужин</option><option>Перекус</option><option>Приём пищи</option>
                   </select>
                 </div>
