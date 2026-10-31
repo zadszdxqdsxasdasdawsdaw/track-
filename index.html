@@ -115,7 +115,7 @@
 
     function weightSeriesInRange(weights, fromDate, toDate) {
       return Object.entries(weights || {})
-        .filter(([d]) => d >= fromDate && d <= toDate)
+        .filter(([d, v]) => d >= fromDate && d <= toDate && v && typeof v.kg === 'number')
         .map(([d, v]) => ({ date: d, kg: v.kg }))
         .sort((a, b) => a.date.localeCompare(b.date));
     }
@@ -137,6 +137,7 @@
     async function ghGetRepo(token, owner, name) {
       const r = await fetch(`${GH}/repos/${owner}/${name}`, { headers: ghHeaders(token) });
       if (r.status === 404) return null;
+      if (!r.ok) throw new Error(`repo ${r.status}`);
       return r.json();
     }
     async function ghCreateRepo(token, name) {
@@ -150,7 +151,9 @@
     async function ghGetFile(token, owner, name, path) {
       const r = await fetch(`${GH}/repos/${owner}/${name}/contents/${path}`, { headers: ghHeaders(token) });
       if (r.status === 404) return null;
+      if (!r.ok) throw new Error(`get ${r.status}`);
       const data = await r.json();
+      if (data.content === undefined || !data.sha) return null;
       return { content: b64decodeUnicode((data.content || '').replace(/\s/g, '')), sha: data.sha };
     }
     async function ghPutFile(token, owner, name, path, content, sha) {
@@ -159,7 +162,12 @@
       const r = await fetch(`${GH}/repos/${owner}/${name}/contents/${path}`, {
         method: 'PUT', headers: ghHeaders(token), body: JSON.stringify(body)
       });
-      if (!r.ok) { const e = new Error(`put ${r.status}`); e.status = r.status; throw e; }
+      if (!r.ok) { 
+        const err = await r.json().catch(()=>({})); 
+        const e = new Error(err.message || `put ${r.status}`); 
+        e.status = r.status; 
+        throw e; 
+      }
       return r.json();
     }
 
@@ -239,6 +247,7 @@
       const writeTimer = useRef(null);
       const initialised = useRef(false);
 
+      // Инициализация
       useEffect(() => {
         if (!token || !owner) return;
         let alive = true;
@@ -251,22 +260,38 @@
 
             const file = await ghGetFile(token, owner, REPO_NAME, FILE_PATH);
             let merged = stateRef.current;
-            if (file) { merged = mergeStates(stateRef.current, JSON.parse(file.content)); lastShaRef.current = file.sha; }
-            if (alive) { setState(merged); setLastSync(Date.now()); initialised.current = true; }
+            
+            if (file) { 
+              try { merged = mergeStates(stateRef.current, JSON.parse(file.content)); } catch(e) {}
+              lastShaRef.current = file.sha; 
+            }
+
+            // Сохраняем на сервер ДО обновления UI, чтобы избежать race condition
             if (!file || JSON.stringify(merged) !== file.content) {
               const res = await ghPutFile(token, owner, REPO_NAME, FILE_PATH, JSON.stringify(merged), file?.sha);
               lastShaRef.current = res?.content?.sha ?? null;
-              if (alive) setLastSync(Date.now());
             }
-          } catch (e) { if (alive) setError(e.message); }
-          finally { if (alive) setLoading(false); }
+
+            if (alive) { 
+              setState(merged); 
+              setLastSync(Date.now()); 
+              initialised.current = true; 
+            }
+          } catch (e) { 
+            if (alive) setError(e.message); 
+          }
+          finally { 
+            if (alive) setLoading(false); 
+          }
         })();
         return () => { alive = false; };
       }, [token, owner]);
 
+      // Сохранение изменений
       useEffect(() => {
         if (!token || !owner || !initialised.current) return;
         if (writeTimer.current) clearTimeout(writeTimer.current);
+        
         writeTimer.current = setTimeout(async () => {
           setSyncing(true);
           try {
@@ -274,26 +299,38 @@
             for (let attempt = 0; attempt < 2; attempt++) {
               const cur = await ghGetFile(token, owner, REPO_NAME, FILE_PATH);
               let toWrite = local;
-              if (cur && cur.sha !== lastShaRef.current) toWrite = mergeStates(local, JSON.parse(cur.content));
+              
+              if (cur && cur.sha !== lastShaRef.current) {
+                toWrite = mergeStates(local, JSON.parse(cur.content));
+              }
+              
+              if (cur && JSON.stringify(toWrite) === cur.content) {
+                lastShaRef.current = cur.sha;
+                setLastSync(Date.now()); setError(null); break;
+              }
+
               try {
                 const res = await ghPutFile(token, owner, REPO_NAME, FILE_PATH, JSON.stringify(toWrite), cur?.sha ?? null);
                 lastShaRef.current = res?.content?.sha ?? null;
                 if (JSON.stringify(toWrite) !== JSON.stringify(local)) setState(toWrite);
                 setLastSync(Date.now()); setError(null); break;
               } catch (e) {
-                if (attempt === 0 && (e.status === 409 || e.status === 422)) continue;
+                if (attempt === 0 && (e.status === 409 || e.status === 422)) continue; // Конфликт, пробуем ещё раз
                 throw e;
               }
             }
           } catch (e) { setError(e.message); }
           finally { setSyncing(false); }
         }, 1500);
+        
         return () => { if (writeTimer.current) clearTimeout(writeTimer.current); };
       }, [state, token, owner]);
 
+      // Опрос сервера
       useEffect(() => {
-        if (!token || !owner) return;
+        if (!token || !owner || !initialised.current) return;
         let alive = true;
+        
         async function poll() {
           if (document.hidden || !alive) return;
           try {
@@ -305,6 +342,7 @@
             }
           } catch {}
         }
+        
         const iv = setInterval(poll, 25000);
         const onVis = () => { if (!document.hidden) poll(); };
         document.addEventListener('visibilitychange', onVis);
@@ -377,7 +415,7 @@
 
     function BarChart({ data, target }) {
       if (!data.length) return <div className="text-xs text-textMuted py-10 text-center">нет данных</div>;
-      const max = Math.max(target || 0, ...data.map(d => d.value)) * 1.1;
+      const max = Math.max(target || 0, ...data.map(d => d.value || 0)) * 1.1;
       return (
         <div className="flex items-end gap-1.5 h-32 w-full mt-4">
           {data.map((d, i) => {
@@ -399,7 +437,7 @@
       const W = 300, H = 120, PL = 30, PR = 10, PT = 10, PB = 20;
       const pw = W - PL - PR, ph = H - PT - PB;
       const minY = Math.min(...data.map(d=>d.kg)) - 1, maxY = Math.max(...data.map(d=>d.kg)) + 1;
-      const range = maxY - minY;
+      const range = maxY - minY || 1;
       const x = i => PL + (i / (data.length - 1)) * pw;
       const y = kg => PT + (1 - (kg - minY) / range) * ph;
       const path = data.map((d, i) => `${i ? 'L' : 'M'} ${x(i).toFixed(1)} ${y(d.kg).toFixed(1)}`).join(' ');
@@ -434,17 +472,15 @@
       const doneToday = activeHabits.filter(h => isDone(state.completions[h.id]?.[today])).length;
       
       const goal = state.settings?.kcalTarget || 2200;
-      const todayKcal = Object.values(state.kcal).filter(k => k.date === today).reduce((sum, k) => sum + k.value, 0);
+      const todayKcal = Object.values(state.kcal).filter(k => k.date === today).reduce((sum, k) => sum + (k.value || 0), 0);
       const latestWeight = weightSeriesInRange(state.weights, '2000-01-01', today).pop()?.kg;
 
-      // Kcal data
       const kcalData = [];
       for (let i = kcalPeriod - 1; i >= 0; i--) {
         const d = addDays(today, -i);
-        const sum = Object.values(state.kcal).filter(k => k.date === d).reduce((s, k) => s + k.value, 0);
+        const sum = Object.values(state.kcal).filter(k => k.date === d).reduce((s, k) => s + (k.value || 0), 0);
         kcalData.push({ label: d.slice(5), value: sum });
       }
-      // Weight data
       const weightData = weightSeriesInRange(state.weights, addDays(today, -weightPeriod), today);
 
       const toggleHabit = (id) => {
@@ -472,10 +508,8 @@
             <Stat label="Цель калорий" value={goal} sub="ккал/день" />
           </div>
 
-          {/* 1. Привычки */}
           <div className="bg-panel border border-border rounded-2xl p-5">
             <h3 className="text-[11px] font-medium text-textMuted uppercase tracking-wider mb-4">Привычки на сегодня</h3>
-            {/* Сетка в 2 колонки */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               {activeHabits.length === 0 && <div className="text-sm text-textMuted">Нет привычек</div>}
               {activeHabits.map(h => {
@@ -495,7 +529,6 @@
             </div>
           </div>
 
-          {/* 2. Калории */}
           <div className="bg-panel border border-border rounded-2xl p-5">
             <div className="flex justify-between items-center mb-2">
               <h3 className="text-[11px] font-medium text-textMuted uppercase tracking-wider">Калории</h3>
@@ -504,7 +537,6 @@
             <BarChart data={kcalData} target={goal} />
           </div>
 
-          {/* 3. Вес */}
           <div className="bg-panel border border-border rounded-2xl p-5">
             <div className="flex justify-between items-center mb-2">
               <h3 className="text-[11px] font-medium text-textMuted uppercase tracking-wider">График веса</h3>
@@ -517,7 +549,6 @@
             </div>
           </div>
 
-          {/* 4. Последние операции */}
           <div className="bg-panel border border-border rounded-2xl p-5">
             <h3 className="text-[11px] font-medium text-textMuted uppercase tracking-wider mb-4">Последние операции</h3>
             <div className="overflow-x-auto">
@@ -604,7 +635,7 @@
     function HabitsTab({ sync, today }) {
       const state = sync.state;
       const [modal, setModal] = useState(null);
-      const [view, setView] = useState('list'); // 'list' | 'calendar'
+      const [view, setView] = useState('list');
       const [selectedHabitId, setSelectedHabitId] = useState(null);
 
       const activeHabits = state.habits.filter(h => !h.archived).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
@@ -711,7 +742,6 @@
       const [kDesc, setKDesc] = useState('Приём пищи');
       const [editKcalId, setEditKcalId] = useState(null);
 
-      // WEIGHT
       const addWeight = () => {
         const v = Number(wVal.replace(',', '.'));
         if (v < 20 || v > 400) return;
@@ -730,7 +760,6 @@
         });
       };
 
-      // KCAL
       const addKcal = () => {
         const v = Number(kVal);
         if (v < 50 || v > 15000) return;
