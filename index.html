@@ -311,7 +311,21 @@
         return () => { alive = false; clearInterval(iv); document.removeEventListener('visibilitychange', onVis); };
       }, [token, owner]);
 
-      return { state, setState, loading, syncing, lastSync, error, forceSync: poll };
+      async function forceSync() {
+        if (!token || !owner) return;
+        setSyncing(true);
+        try {
+          const cur = await ghGetFile(token, owner, REPO_NAME, FILE_PATH);
+          let merged = stateRef.current, sha = null;
+          if (cur) { merged = mergeStates(stateRef.current, JSON.parse(cur.content)); sha = cur.sha; }
+          const res = await ghPutFile(token, owner, REPO_NAME, FILE_PATH, JSON.stringify(merged), sha);
+          lastShaRef.current = res?.content?.sha ?? null;
+          setState(merged); setLastSync(Date.now()); setError(null);
+        } catch (e) { setError(e.message); }
+        finally { setSyncing(false); }
+      }
+
+      return { state, setState, loading, syncing, lastSync, error, forceSync };
     }
 
     const LS_TOKEN = 'habits_gh_token_v1';
@@ -542,7 +556,7 @@
       const m = currentDate.getMonth();
       
       const firstDay = new Date(y, m, 1);
-      const startOffset = (firstDay.getDay() + 6) % 7; // Mon = 0
+      const startOffset = (firstDay.getDay() + 6) % 7;
       const daysInMonth = new Date(y, m + 1, 0).getDate();
       
       const prevMonth = () => setCurrentDate(new Date(y, m - 1, 1));
@@ -594,7 +608,6 @@
 
       const activeHabits = state.habits.filter(h => !h.archived).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
       
-      // Если календарь и не выбрана привычка, выбираем первую
       if (view === 'calendar' && !selectedHabitId && activeHabits.length > 0) {
         setSelectedHabitId(activeHabits[0].id);
       }
