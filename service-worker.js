@@ -1,7 +1,6 @@
-const CACHE = 'habits-v3';
+// language: JavaScript, file: service-worker.js
+const CACHE = 'habits-v4';
 const SHELL = [
-  './',
-  './index.html',
   './manifest.webmanifest',
   './icon.svg'
 ];
@@ -19,20 +18,43 @@ self.addEventListener('activate', e => {
 });
 
 self.addEventListener('fetch', e => {
-  const url = new URL(e.request.url);
-  // GitHub API не кэшируем — всегда свежие данные
-  if (url.hostname === 'api.github.com') return;
+  const req = e.request;
+  const url = new URL(req.url);
 
-  e.respondWith(
-    caches.match(e.request).then(cached => {
-      if (cached) return cached;
-      return fetch(e.request).then(res => {
-        if (res.ok && e.request.method === 'GET') {
+  // GitHub API и сторонние CDN — всегда в сеть, без кэша
+  if (url.hostname === 'api.github.com') return;
+  if (url.hostname !== location.hostname) return;
+
+  // HTML и навигационные запросы — network-first (свежий index.html всегда)
+  const isHTML = req.mode === 'navigate'
+    || (req.headers.get('accept') || '').includes('text/html')
+    || url.pathname.endsWith('/')
+    || url.pathname.endsWith('/index.html');
+
+  if (isHTML) {
+    e.respondWith(
+      fetch(req)
+        .then(res => {
           const clone = res.clone();
-          caches.open(CACHE).then(c => c.put(e.request, clone));
+          caches.open(CACHE).then(c => c.put(req, clone));
+          return res;
+        })
+        .catch(() => caches.match(req).then(c => c || caches.match('./index.html')))
+    );
+    return;
+  }
+
+  // Остальное (иконки, манифест) — cache-first, с фоновым обновлением
+  e.respondWith(
+    caches.match(req).then(cached => {
+      const fetched = fetch(req).then(res => {
+        if (res.ok && req.method === 'GET') {
+          const clone = res.clone();
+          caches.open(CACHE).then(c => c.put(req, clone));
         }
         return res;
-      }).catch(() => caches.match('./index.html'));
+      }).catch(() => cached);
+      return cached || fetched;
     })
   );
 });
