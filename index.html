@@ -3,41 +3,62 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#020617">
+  <meta name="theme-color" content="#0a0a0a">
+  <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-  <meta name="apple-mobile-web-app-title" content="Habits">
+  <meta name="apple-mobile-web-app-title" content="Трекер">
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icon.svg" type="image/svg+xml">
-  <link rel="apple-touch-icon" href="icon.svg">
-  <title>Habits</title>
+  <title>Трекер</title>
   <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            base: '#0a0a0a',
+            panel: '#141414',
+            border: '#262626',
+            accent: '#eab308',
+            accentMuted: '#854d0e',
+            textMuted: '#a3a3a3',
+            success: '#22c55e',
+            danger: '#ef4444'
+          },
+          fontFamily: {
+            sans: ['Inter', 'system-ui', '-apple-system', 'sans-serif'],
+            mono: ['ui-monospace', 'SFMono-Regular', 'Menlo', 'Monaco', 'Consolas', 'monospace']
+          }
+        }
+      }
+    }
+  </script>
   <script crossorigin src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
   <script src="https://unpkg.com/@babel/standalone@7.25.6/babel.min.js"></script>
   <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
     html, body, #root { height: 100%; margin: 0; }
     body {
       -webkit-tap-highlight-color: transparent;
-      background: #020617; color: #e2e8f0;
-      font-family: system-ui, -apple-system, sans-serif;
+      background: #0a0a0a; color: #ededed;
       overscroll-behavior-y: contain;
     }
-    ::-webkit-scrollbar { width: 6px; height: 6px; }
-    ::-webkit-scrollbar-thumb { background: #1e293b; border-radius: 3px; }
-    input, button, select, textarea { font-family: inherit; }
-    @media (display-mode: standalone) {
-      body { padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); }
-    }
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-track { background: #0a0a0a; }
+    ::-webkit-scrollbar-thumb { background: #262626; border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: #404040; }
     @keyframes spin { to { transform: rotate(360deg); } }
     .spin { display: inline-block; animation: spin 1.2s linear infinite; }
+    .glass { background: rgba(20, 20, 20, 0.7); backdrop-filter: blur(12px); }
   </style>
 </head>
 <body>
   <div id="root"></div>
 
   <script type="text/babel" data-presets="react">
-    const { useState, useEffect, useMemo, useRef, useCallback } = React;
+    const { useState, useEffect, useMemo, useRef } = React;
 
     /* ===================== DATES ===================== */
     function isoDate(d = new Date()) {
@@ -49,11 +70,6 @@
     }
     function daysBetween(a, b) {
       return Math.round(Math.abs(new Date(a + 'T00:00:00') - new Date(b + 'T00:00:00')) / 86400000);
-    }
-    function getWeekStart(iso) {
-      const d = new Date(iso + 'T00:00:00');
-      const dow = (d.getDay() + 6) % 7;
-      return addDays(iso, -dow);
     }
     function plural(n, one, few, many) {
       const m = n % 100, k = n % 10;
@@ -98,71 +114,12 @@
       while (isDone(completions[habitId]?.[day])) { n++; day = addDays(day, -1); }
       return n;
     }
-    function longestStreak(habitId, completions) {
-      const dates = Object.entries(completions[habitId] || {}).filter(([, v]) => isDone(v)).map(([d]) => d).sort();
-      if (!dates.length) return 0;
-      let best = 1, cur = 1;
-      for (let i = 1; i < dates.length; i++) {
-        if (daysBetween(dates[i - 1], dates[i]) === 1) cur++; else cur = 1;
-        if (cur > best) best = cur;
-      }
-      return best;
-    }
-    function habitCompletionRate(habitId, completions, fromDate, toDate) {
-      let done = 0, total = 0;
-      let cur = fromDate;
-      while (cur <= toDate) {
-        total++;
-        if (isDone(completions[habitId]?.[cur])) done++;
-        cur = addDays(cur, 1);
-      }
-      return total > 0 ? done / total : 0;
-    }
-    function totalDone(habitId, completions) {
-      return Object.values(completions[habitId] || {}).filter(isDone).length;
-    }
     function weightSeriesInRange(weights, fromDate, toDate) {
       return Object.entries(weights || {})
         .filter(([d]) => d >= fromDate && d <= toDate)
         .map(([d, v]) => ({ date: d, kg: v.kg, ts: v.ts }))
         .sort((a, b) => a.date.localeCompare(b.date));
     }
-    function weightMovingAvg(entries, window = 7) {
-      return entries.map((e, i) => {
-        const from = Math.max(0, i - window + 1);
-        const win = entries.slice(from, i + 1);
-        const ma = win.length >= Math.min(3, entries.length)
-          ? win.reduce((a, w) => a + w.kg, 0) / win.length
-          : undefined;
-        return { ...e, ma };
-      });
-    }
-    function slopePerWeek(entries) {
-      if (entries.length < 4) return null;
-      const sorted = [...entries].sort((a, b) => a.date.localeCompare(b.date));
-      const t0 = new Date(sorted[0].date + 'T00:00:00').getTime();
-      const pts = sorted.map(e => ({ x: (new Date(e.date + 'T00:00:00').getTime() - t0) / 86400000, y: e.kg }));
-      const n = pts.length;
-      const sx = pts.reduce((a, p) => a + p.x, 0), sy = pts.reduce((a, p) => a + p.y, 0);
-      const sxx = pts.reduce((a, p) => a + p.x * p.x, 0), sxy = pts.reduce((a, p) => a + p.x * p.y, 0);
-      const d = n * sxx - sx * sx;
-      if (Math.abs(d) < 1e-9) return null;
-      return ((n * sxy - sx * sy) / d) * 7;
-    }
-    function kcalSeriesInRange(kcal, fromDate, toDate) {
-      return Object.entries(kcal || {})
-        .filter(([d]) => d >= fromDate && d <= toDate)
-        .map(([d, v]) => ({ date: d, value: v.value, ts: v.ts }))
-        .sort((a, b) => a.date.localeCompare(b.date));
-    }
-
-    /* ===================== COLORS ===================== */
-    const COLORS = {
-      emerald: { hex: '#34d399' }, sky: { hex: '#38bdf8' }, violet: { hex: '#a78bfa' },
-      amber: { hex: '#fbbf24' }, rose: { hex: '#fb7185' }, teal: { hex: '#2dd4bf' }
-    };
-    const COLOR_KEYS = Object.keys(COLORS);
-    const getColor = id => COLORS[id] || COLORS.emerald;
 
     /* ===================== GITHUB REPO SYNC ===================== */
     const GH = 'https://api.github.com';
@@ -194,13 +151,10 @@
         method: 'POST', headers: ghHeaders(token),
         body: JSON.stringify({
           name, private: true, auto_init: true,
-          description: 'Habits tracker data (do not rename — app relies on this name)'
+          description: 'Tracker data (do not rename)'
         })
       });
-      if (!r.ok) {
-        const err = await r.json().catch(() => ({}));
-        throw new Error((err?.message || `create repo ${r.status}`) + ' — создай приватный репозиторий вручную или используй классический токен со scope repo');
-      }
+      if (!r.ok) throw new Error('Не удалось создать репозиторий. Проверь права токена (scope repo).');
       return r.json();
     }
     async function ghGetFile(token, owner, name, path) {
@@ -212,7 +166,7 @@
       return { content: b64decodeUnicode((data.content || '').replace(/\s/g, '')), sha: data.sha };
     }
     async function ghPutFile(token, owner, name, path, content, sha) {
-      const body = { message: `habits update ${new Date().toISOString()}`, content: b64encodeUnicode(content) };
+      const body = { message: `tracker update ${new Date().toISOString()}`, content: b64encodeUnicode(content) };
       if (sha) body.sha = sha;
       const r = await fetch(`${GH}/repos/${owner}/${name}/contents/${path}`, {
         method: 'PUT', headers: ghHeaders(token), body: JSON.stringify(body)
@@ -306,7 +260,6 @@
       const [syncing, setSyncing] = useState(false);
       const [lastSync, setLastSync] = useState(null);
       const [error, setError] = useState(null);
-      const [repoStatus, setRepoStatus] = useState('pending');
 
       const stateRef = useRef(state); stateRef.current = state;
       const lastShaRef = useRef(null);
@@ -317,18 +270,16 @@
         if (!token || !owner) return;
         let alive = true;
         (async () => {
-          setLoading(true); setError(null); setRepoStatus('pending');
+          setLoading(true); setError(null);
           try {
             let repo = await ghGetRepo(token, owner, REPO_NAME);
-            if (!repo) { setRepoStatus('creating'); repo = await ghCreateRepo(token, REPO_NAME); }
-            if (!repo.private) throw new Error(`репозиторий ${owner}/${REPO_NAME} существует и публичный — сделай его приватным или удали`);
-            setRepoStatus('ready');
+            if (!repo) repo = await ghCreateRepo(token, REPO_NAME);
+            if (!repo.private) throw new Error(`репозиторий ${owner}/${REPO_NAME} публичный — сделай его приватным`);
 
             const file = await ghGetFile(token, owner, REPO_NAME, FILE_PATH);
             let merged = stateRef.current;
             if (file) {
-              const remote = JSON.parse(file.content);
-              merged = mergeStates(stateRef.current, remote);
+              merged = mergeStates(stateRef.current, JSON.parse(file.content));
               lastShaRef.current = file.sha;
             }
             if (alive) { setState(merged); setLastSync(Date.now()); initialised.current = true; }
@@ -357,8 +308,7 @@
               const cur = await ghGetFile(token, owner, REPO_NAME, FILE_PATH);
               let toWrite = local;
               if (cur && cur.sha !== lastShaRef.current) {
-                const remote = JSON.parse(cur.content);
-                toWrite = mergeStates(local, remote);
+                toWrite = mergeStates(local, JSON.parse(cur.content));
               }
               try {
                 const res = await ghPutFile(token, owner, REPO_NAME, FILE_PATH, JSON.stringify(toWrite), cur?.sha ?? null);
@@ -385,8 +335,7 @@
           try {
             const cur = await ghGetFile(token, owner, REPO_NAME, FILE_PATH);
             if (cur && cur.sha !== lastShaRef.current) {
-              const remote = JSON.parse(cur.content);
-              const merged = mergeStates(stateRef.current, remote);
+              const merged = mergeStates(stateRef.current, JSON.parse(cur.content));
               lastShaRef.current = cur.sha;
               if (alive) { setState(merged); setLastSync(Date.now()); }
             }
@@ -412,943 +361,452 @@
         finally { setSyncing(false); }
       }
 
-      return { state, setState, loading, syncing, lastSync, error, forceSync, repoStatus };
+      return { state, setState, loading, syncing, lastSync, error, forceSync };
     }
 
     /* ===================== LOCAL STORAGE ===================== */
     const LS_TOKEN = 'habits_gh_token_v1';
     const LS_OWNER = 'habits_gh_owner_v1';
 
-    /* ===================== AUTH SCREEN ===================== */
-    function AuthScreen({ onReady, initialError }) {
-      const [token, setToken] = useState('');
-      const [busy, setBusy] = useState(false);
-      const [err, setErr] = useState(initialError || null);
+    /* ===================== ICONS ===================== */
+    const IconDash = () => <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg>;
+    const IconHabits = () => <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 11 12 14 22 4"></polyline><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path></svg>;
+    const IconHealth = () => <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"></path></svg>;
+    const IconSettings = () => <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>;
 
-      async function submit(e) {
-        e.preventDefault();
-        const t = token.trim();
-        if (!t) return;
-        setErr(null); setBusy(true);
-        try {
-          const user = await ghVerify(t);
-          localStorage.setItem(LS_TOKEN, t);
-          localStorage.setItem(LS_OWNER, user.login);
-          onReady(t, user.login);
-        } catch (e) { setErr(e.message); }
-        finally { setBusy(false); }
-      }
-
-      return (
-        <div className="min-h-full flex items-center justify-center p-4">
-          <div className="w-full max-w-sm">
-            <div className="text-center mb-6">
-              <h1 className="text-2xl font-bold">Habits</h1>
-              <p className="text-slate-500 text-xs mt-1">данные — в приватном репозитории на твоём github</p>
-            </div>
-            <form onSubmit={submit} className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-3">
-              <label className="block text-xs text-slate-400">github token
-                <input type="password" value={token} onChange={e => setToken(e.target.value)}
-                  placeholder="ghp_… / github_pat_…" autoCapitalize="none" autoCorrect="off" spellCheck={false}
-                  className="mt-1 w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm font-mono focus:border-emerald-500 outline-none" />
-              </label>
-              {err && <div className="text-amber-400 text-xs">{err}</div>}
-              <button type="submit" disabled={busy}
-                className="w-full bg-emerald-500 text-slate-950 font-semibold rounded-lg py-2.5 active:scale-[.99] transition disabled:opacity-50">
-                {busy ? '…' : 'подключить'}
-              </button>
-              <div className="text-[11px] text-slate-500 leading-relaxed pt-1 space-y-1">
-                <div>как получить токен:</div>
-                <ol className="list-decimal list-inside space-y-0.5 text-slate-400">
-                  <li>github.com/settings/tokens → generate new (classic)</li>
-                  <li>отметь scope <span className="font-mono text-emerald-400">repo</span></li>
-                  <li>скопируй и вставь сюда</li>
-                </ol>
-                <div className="pt-1">токен сохранится в этом браузере — вводить заново не придётся.</div>
-              </div>
-            </form>
-          </div>
-        </div>
-      );
-    }
-
-    /* ===================== SYNC BADGE ===================== */
+    /* ===================== COMPONENTS ===================== */
     function SyncBadge({ syncing, lastSync, error, onSync }) {
       return (
-        <button onClick={onSync} title={error || (lastSync ? 'обновлено ' + relativeTime(lastSync) : '')}
-          className="text-xs px-2 py-1 rounded hover:bg-slate-800 transition flex items-center gap-1">
-          {error ? <span className="text-amber-400">⚠</span>
-           : syncing ? <span className="spin text-emerald-400">↻</span>
-           : <span className="text-emerald-500">✓</span>}
-          <span className="text-slate-500 text-[10px]">
-            {error ? 'ошибка' : lastSync ? relativeTime(lastSync) : '—'}
-          </span>
+        <button onClick={onSync} className="flex items-center gap-2 text-xs text-textMuted hover:text-accent transition px-3 py-1.5 rounded-lg border border-border bg-panel">
+          {error ? <span className="text-danger">⚠ ошибка</span>
+           : syncing ? <span className="text-accent">↻ синхронизация</span>
+           : <><span className="w-1.5 h-1.5 rounded-full bg-success"></span> обновлено {lastSync ? relativeTime(lastSync) : '—'} назад</>}
         </button>
       );
     }
 
-    /* ===================== REUSABLE UI ===================== */
-    function PeriodSelector({ value, onChange, options = [7, 30, 90, 365] }) {
-      const labels = { 7: '7д', 30: '30д', 90: '90д', 365: '1г' };
+    function Stat({ label, value, sub, trend }) {
       return (
-        <div className="flex gap-1 bg-slate-950 rounded-lg p-1">
-          {options.map(o => (
-            <button key={o} onClick={() => onChange(o)}
-              className={`text-[11px] px-2 py-1 rounded transition ${value === o ? 'bg-emerald-500 text-slate-950 font-medium' : 'text-slate-400 hover:text-slate-200'}`}>
-              {labels[o] || o}
-            </button>
-          ))}
+        <div className="bg-panel border border-border rounded-2xl p-5 flex flex-col justify-between">
+          <div className="text-[11px] font-medium text-textMuted uppercase tracking-wider mb-3">{label}</div>
+          <div className="flex items-baseline gap-2">
+            <div className="text-2xl font-bold tracking-tight">{value}</div>
+            {sub && <div className="text-xs text-textMuted">{sub}</div>}
+          </div>
+          {trend && <div className={`text-xs mt-1 font-medium ${trend.startsWith('+') ? 'text-success' : trend.startsWith('-') ? 'text-danger' : 'text-textMuted'}`}>{trend}</div>}
         </div>
       );
     }
 
-    function Stat({ label, value, sub }) {
+    function DonutChart({ data }) {
+      const total = data.reduce((a, d) => a + d.value, 0);
+      if (total === 0) return <div className="w-32 h-32 rounded-full border-[10px] border-border flex items-center justify-center text-xs text-textMuted">пусто</div>;
+      
+      let cur = 0;
+      const r = 56, C = 2 * Math.PI * r;
       return (
-        <div className="bg-slate-900 border border-slate-800 rounded-xl p-3 text-center">
-          <div className="text-xl font-semibold">{value}</div>
-          <div className="text-[10px] text-slate-500 mt-0.5">{label}</div>
-          {sub && <div className="text-[9px] text-slate-600 mt-0.5">{sub}</div>}
+        <div className="relative w-36 h-36">
+          <svg viewBox="0 0 140 140" className="w-full h-full -rotate-90">
+            <circle cx="70" cy="70" r={r} fill="none" stroke="#262626" strokeWidth="16" />
+            {data.map((d, i) => {
+              if (d.value === 0) return null;
+              const frac = d.value / total;
+              const dash = frac * C;
+              const offset = -cur * C;
+              cur += frac;
+              return <circle key={i} cx="70" cy="70" r={r} fill="none" stroke={d.color} strokeWidth="16" strokeDasharray={`${dash} ${C}`} strokeDashoffset={offset} className="transition-all duration-500" />;
+            })}
+          </svg>
+          <div className="absolute inset-0 flex flex-col items-center justify-center">
+            <div className="text-xl font-bold">{Math.round(data.reduce((a, d) => a + d.value, 0))}</div>
+            <div className="text-[10px] text-textMuted uppercase">всего</div>
+          </div>
         </div>
       );
     }
 
-    function MiniCalendar({ habitId, completions, color, days = 14 }) {
-      const today = isoDate();
-      const cells = [];
-      for (let i = days - 1; i >= 0; i--) {
+    function BarChart({ data, target }) {
+      if (!data.length) return <div className="text-xs text-textMuted py-10 text-center">нет данных</div>;
+      const max = Math.max(target || 0, ...data.map(d => d.value)) * 1.1;
+      return (
+        <div className="flex items-end gap-2 h-32 w-full">
+          {data.map((d, i) => {
+            const h = (d.value / max) * 100;
+            const over = d.value > target;
+            return (
+              <div key={i} className="flex-1 flex flex-col items-center justify-end h-full gap-1 group relative">
+                <div className="opacity-0 group-hover:opacity-100 absolute -top-6 text-[10px] bg-border px-1.5 py-0.5 rounded text-white pointer-events-none transition">{d.value}</div>
+                <div className="w-full max-w-[24px] rounded-t-sm transition-all duration-500" style={{ height: `${h}%`, background: over ? '#ef4444' : '#eab308' }} />
+                <div className="text-[9px] text-textMuted">{d.label}</div>
+              </div>
+            );
+          })}
+        </div>
+      );
+    }
+
+    /* ===================== VIEWS ===================== */
+
+    function DashboardTab({ sync, today }) {
+      const state = sync.state;
+      const activeHabits = state.habits.filter(h => !h.archived);
+      const doneToday = activeHabits.filter(h => isDone(state.completions[h.id]?.[today])).length;
+      
+      const goal = state.settings?.kcalTarget || 2200;
+      const todayKcal = state.kcal[today]?.value || 0;
+      const latestWeight = weightSeriesInRange(state.weights, '2000-01-01', today).pop()?.kg;
+
+      const habitsData = activeHabits.map(h => ({
+        color: '#eab308',
+        value: currentStreak(h.id, state.completions, today)
+      }));
+
+      const kcal7 = [];
+      for (let i = 6; i >= 0; i--) {
         const d = addDays(today, -i);
-        cells.push({ d, done: isDone(completions[habitId]?.[d]) });
+        const val = state.kcal[d]?.value || 0;
+        kcal7.push({ label: d.slice(5), value: val });
       }
-      return (
-        <div className="flex gap-[2px] mt-2">
-          {cells.map(c => (
-            <div key={c.d} title={c.d} style={{
-              width: 8, height: 8, borderRadius: 2,
-              background: c.done ? color.hex : '#1e293b'
-            }} />
-          ))}
-        </div>
-      );
-    }
 
-    function Heatmap({ habitId, completions, today, color, onToggleDate }) {
-      const grid = useMemo(() => {
-        const endWeekStart = getWeekStart(today);
-        const out = [];
-        for (let w = 11; w >= 0; w--) {
-          const ws = addDays(endWeekStart, -w * 7);
-          const col = [];
-          for (let d = 0; d < 7; d++) {
-            const date = addDays(ws, d);
-            col.push({ date, done: isDone(completions[habitId]?.[date]), future: date > today });
-          }
-          out.push(col);
-        }
-        return out;
-      }, [habitId, completions, today]);
-
-      const DOW = ['Пн', '', 'Ср', '', 'Пт', '', ''];
       return (
-        <div className="overflow-x-auto">
-          <div className="inline-flex gap-2">
-            <div className="flex flex-col gap-1">
-              {DOW.map((d, i) => (
-                <div key={i} className="text-[9px] text-slate-500 h-[14px] leading-[14px]">{d}</div>
-              ))}
-            </div>
-            <div className="flex gap-1">
-              {grid.map((week, wi) => (
-                <div key={wi} className="flex flex-col gap-1">
-                  {week.map(cell => (
-                    <button key={cell.date}
-                      onClick={() => !cell.future && onToggleDate(habitId, cell.date)}
-                      title={cell.date}
-                      style={{
-                        width: 14, height: 14, borderRadius: 3,
-                        background: cell.future ? 'transparent' : (cell.done ? color : '#1e293b'),
-                        opacity: cell.future ? 0.15 : 1,
-                        cursor: cell.future ? 'default' : 'pointer',
-                        border: 'none', padding: 0
-                      }} />
+        <div className="space-y-6">
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+            <Stat label="Привычки сегодня" value={`${doneToday} / ${activeHabits.length}`} sub="выполнено" trend={doneToday === activeHabits.length && activeHabits.length > 0 ? "Всё готово!" : ""} />
+            <Stat label="Калории сегодня" value={todayKcal} sub="ккал" trend={todayKcal > goal ? `+${todayKcal - goal} к цели` : goal - todayKcal > 0 ? `осталось ${goal - todayKcal}` : ""} />
+            <Stat label="Вес" value={latestWeight ? latestWeight.toFixed(1) : '—'} sub="кг" trend={latestWeight ? "актуально" : "нет данных"} />
+            <Stat label="Цель калорий" value={goal} sub="ккал/день" />
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <div className="bg-panel border border-border rounded-2xl p-5">
+              <h3 className="text-[11px] font-medium text-textMuted uppercase tracking-wider mb-6">Серии привычек</h3>
+              <div className="flex items-center gap-8">
+                <DonutChart data={habitsData} />
+                <div className="flex-1 space-y-3">
+                  {activeHabits.slice(0, 5).map(h => (
+                    <div key={h.id} className="flex items-center justify-between text-xs">
+                      <span className="truncate pr-2">{h.name}</span>
+                      <span className="font-mono text-accent shrink-0">🔥 {currentStreak(h.id, state.completions, today)}</span>
+                    </div>
                   ))}
+                  {activeHabits.length > 5 && <div className="text-xs text-textMuted pt-2">и ещё {activeHabits.length - 5}...</div>}
+                  {activeHabits.length === 0 && <div className="text-xs text-textMuted">Добавь привычки, чтобы видеть серии</div>}
                 </div>
-              ))}
+              </div>
             </div>
-          </div>
-        </div>
-      );
-    }
 
-    /* ===================== HABITS TAB ===================== */
-    function HabitRow({ habit, state, today, onToggle, onOpen }) {
-      const color = getColor(habit.color);
-      const done = isDone(state.completions[habit.id]?.[today]);
-      const streak = currentStreak(habit.id, state.completions, today);
-      return (
-        <div className="flex items-center gap-3 bg-slate-900 border border-slate-800 rounded-xl p-3">
-          <button onClick={onOpen} className="flex-1 text-left min-w-0">
-            <div className="text-sm font-medium truncate">{habit.name}</div>
-            <div className="text-[11px] mt-0.5" style={{ color: streak > 0 ? color.hex : '#64748b' }}>
-              {streak > 0 ? `🔥 ${streak} ${plural(streak, 'день', 'дня', 'дней')} подряд` : 'нет серии'}
+            <div className="bg-panel border border-border rounded-2xl p-5">
+              <h3 className="text-[11px] font-medium text-textMuted uppercase tracking-wider mb-6">Калории (7 дней)</h3>
+              <BarChart data={kcal7} target={goal} />
             </div>
-            <MiniCalendar habitId={habit.id} completions={state.completions} color={color} />
-          </button>
-          <button onClick={() => onToggle(habit.id)} aria-label="отметить"
-            style={{
-              width: 48, height: 48, borderRadius: '50%',
-              border: '2px solid ' + (done ? color.hex : '#475569'),
-              background: done ? color.hex : 'transparent',
-              color: done ? '#020617' : '#475569',
-              fontSize: 22, fontWeight: 700,
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              cursor: 'pointer', flexShrink: 0, transition: 'all .15s ease'
-            }}>
-            {done ? '✓' : ''}
-          </button>
-        </div>
-      );
-    }
+          </div>
 
-    function HabitDetail({ habit, state, today, onBack, onToggleDate, onDelete, onArchive }) {
-      const color = getColor(habit.color);
-      const streak = currentStreak(habit.id, state.completions, today);
-      const best = longestStreak(habit.id, state.completions);
-      const rate30 = habitCompletionRate(habit.id, state.completions, addDays(today, -29), today);
-      const total = totalDone(habit.id, state.completions);
-      return (
-        <div className="p-4 space-y-4">
-          <button onClick={onBack} className="text-sm text-slate-400 hover:text-slate-200">← назад</button>
-          <div>
-            <h1 className="text-xl font-semibold">{habit.name}</h1>
-            <div className="text-xs text-slate-500 mt-1">создана {habit.createdAt}</div>
-          </div>
-          <div className="grid grid-cols-3 gap-2">
-            <Stat label="серия" value={streak} />
-            <Stat label="рекорд" value={best} />
-            <Stat label="30 дней" value={Math.round(rate30 * 100) + '%'} />
-          </div>
-          <div className="bg-slate-900 border border-slate-800 rounded-xl p-3">
-            <div className="text-xs text-slate-400 mb-2">12 недель · клик переключает день</div>
-            <Heatmap habitId={habit.id} completions={state.completions} today={today} color={color.hex} onToggleDate={onToggleDate} />
-          </div>
-          <div className="bg-slate-900 border border-slate-800 rounded-xl p-3 flex items-baseline justify-between">
-            <div className="text-xs text-slate-400">всего выполнено</div>
-            <div className="text-2xl font-semibold" style={{ color: color.hex }}>
-              {total} <span className="text-sm text-slate-500">{plural(total, 'раз', 'раза', 'раз')}</span>
+          <div className="bg-panel border border-border rounded-2xl p-5">
+            <h3 className="text-[11px] font-medium text-textMuted uppercase tracking-wider mb-4">Последние операции</h3>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-sm">
+                <thead>
+                  <tr className="text-textMuted border-b border-border text-[10px] uppercase tracking-wider">
+                    <th className="pb-3 font-medium">Дата</th>
+                    <th className="pb-3 font-medium">Тип</th>
+                    <th className="pb-3 font-medium">Значение</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-border">
+                  {[...Object.entries(state.weights).map(([d, v]) => ({ date: d, type: 'Вес', val: v.kg + ' кг', ts: v.ts, color: 'text-white' })),
+                    ...Object.entries(state.kcal).map(([d, v]) => ({ date: d, type: 'Калории', val: v.value + ' ккал', ts: v.ts, color: 'text-accent' }))]
+                    .sort((a, b) => b.ts - a.ts)
+                    .slice(0, 5)
+                    .map((op, i) => (
+                      <tr key={i}>
+                        <td className="py-3 text-textMuted font-mono text-xs">{op.date}</td>
+                        <td className="py-3">{op.type}</td>
+                        <td className={`py-3 font-medium ${op.color}`}>{op.val}</td>
+                      </tr>
+                    ))}
+                  {Object.keys(state.weights).length === 0 && Object.keys(state.kcal).length === 0 && (
+                    <tr><td colSpan="3" className="py-6 text-center text-textMuted text-xs">Нет записей. Добавь данные.</td></tr>
+                  )}
+                </tbody>
+              </table>
             </div>
           </div>
-          <div className="flex gap-2">
-            <button onClick={() => onArchive(habit.id)}
-              className="flex-1 bg-slate-800 hover:bg-slate-700 rounded-lg py-2 text-sm transition">
-              {habit.archived ? 'разархивировать' : 'архивировать'}
-            </button>
-            <button onClick={() => { if (confirm('удалить привычку и всю историю?')) onDelete(habit.id); }}
-              className="flex-1 bg-red-950/40 border border-red-900/60 text-red-300 hover:bg-red-950/60 rounded-lg py-2 text-sm transition">
-              удалить
-            </button>
-          </div>
-        </div>
-      );
-    }
-
-    function NewHabitModal({ onSave, onClose }) {
-      const [name, setName] = useState('');
-      const [color, setColor] = useState('emerald');
-      function submit(e) {
-        e.preventDefault();
-        const t = name.trim();
-        if (!t) return;
-        onSave({ id: crypto.randomUUID(), name: t, color, createdAt: isoDate(), updatedAt: Date.now(), archived: false });
-      }
-      return (
-        <div className="fixed inset-0 bg-black/70 flex items-center justify-center p-4 z-50" onClick={onClose}>
-          <form onClick={e => e.stopPropagation()} onSubmit={submit}
-            className="bg-slate-900 border border-slate-800 rounded-2xl p-4 w-full max-w-sm space-y-3">
-            <h2 className="text-base font-semibold">новая привычка</h2>
-            <input value={name} onChange={e => setName(e.target.value)} autoFocus
-              placeholder="например: 20 приседаний утром"
-              className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm focus:border-emerald-500 outline-none" />
-            <div className="flex gap-2">
-              {COLOR_KEYS.map(k => (
-                <button key={k} type="button" onClick={() => setColor(k)}
-                  style={{
-                    background: COLORS[k].hex, width: 36, height: 36, borderRadius: '50%',
-                    outline: color === k ? '2px solid #fff' : 'none',
-                    outlineOffset: 3, cursor: 'pointer', border: 'none'
-                  }} />
-              ))}
-            </div>
-            <div className="flex gap-2 pt-1">
-              <button type="button" onClick={onClose}
-                className="flex-1 bg-slate-800 hover:bg-slate-700 rounded-lg py-2 text-sm transition">отмена</button>
-              <button type="submit"
-                className="flex-1 bg-emerald-500 text-slate-950 font-medium rounded-lg py-2 text-sm active:scale-95 transition">создать</button>
-            </div>
-          </form>
         </div>
       );
     }
 
     function HabitsTab({ sync, today }) {
       const state = sync.state;
-      const [view, setView] = useState({ type: 'list' });
       const [showNew, setShowNew] = useState(false);
-      const [showArchived, setShowArchived] = useState(false);
-
       const activeHabits = state.habits.filter(h => !h.archived).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-      const archivedHabits = state.habits.filter(h => h.archived);
-      const doneToday = activeHabits.filter(h => isDone(state.completions[h.id]?.[today])).length;
-      const totalActive = activeHabits.length;
-      const allDone = totalActive > 0 && doneToday === totalActive;
 
       function toggleDate(habitId, date) {
         sync.setState(prev => {
           const now = Date.now();
           const c = { ...prev.completions };
           c[habitId] = { ...(c[habitId] || {}) };
-          const cur = isDone(c[habitId][date]);
-          c[habitId][date] = { on: !cur, ts: now };
+          c[habitId][date] = { on: !isDone(c[habitId][date]), ts: now };
           return { ...prev, completions: c };
         });
       }
       function addHabit(habit) { sync.setState(prev => ({ ...prev, habits: [...prev.habits, habit] })); setShowNew(false); }
-      function deleteHabit(id) {
-        sync.setState(prev => ({
-          ...prev,
-          habits: prev.habits.filter(h => h.id !== id),
-          completions: Object.fromEntries(Object.entries(prev.completions).filter(([k]) => k !== id)),
-          deleted: { ...prev.deleted, [id]: Date.now() }
-        }));
-        setView({ type: 'list' });
-      }
-      function archiveHabit(id) {
-        sync.setState(prev => ({
-          ...prev,
-          habits: prev.habits.map(h => h.id === id ? { ...h, archived: !h.archived, updatedAt: Date.now() } : h)
-        }));
-        setView({ type: 'list' });
-      }
-
-      if (view.type === 'detail') {
-        const habit = state.habits.find(h => h.id === view.habitId);
-        if (!habit) { setView({ type: 'list' }); return null; }
-        return <HabitDetail habit={habit} state={state} today={today}
-          onBack={() => setView({ type: 'list' })}
-          onToggleDate={toggleDate}
-          onDelete={deleteHabit}
-          onArchive={archiveHabit} />;
-      }
+      function deleteHabit(id) { if(confirm('Удалить?')) sync.setState(prev => ({ ...prev, habits: prev.habits.filter(h => h.id !== id), deleted: { ...prev.deleted, [id]: Date.now() } })); }
 
       return (
-        <div className="p-4 space-y-4 pb-24">
-          {totalActive > 0 && (
-            <div className="bg-slate-900 border border-slate-800 rounded-xl p-3">
-              <div className="flex justify-between text-xs text-slate-400 mb-1.5">
-                <span>{allDone ? '🎉 всё выполнено' : 'сегодня'}</span>
-                <span>{doneToday} / {totalActive}</span>
-              </div>
-              <div className="h-2 rounded-full bg-slate-800 overflow-hidden">
-                <div className="h-full rounded-full transition-all"
-                  style={{ width: `${totalActive ? (doneToday / totalActive) * 100 : 0}%`, background: allDone ? '#34d399' : '#64748b' }} />
-              </div>
-            </div>
-          )}
-
-          {activeHabits.length === 0 && archivedHabits.length === 0 && (
-            <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 text-center">
-              <div className="text-slate-400 text-sm">пока пусто</div>
-              <div className="text-slate-600 text-xs mt-1">нажми + чтобы создать первую привычку</div>
-            </div>
-          )}
-
-          <div className="space-y-2">
-            {activeHabits.map(h => (
-              <HabitRow key={h.id} habit={h} state={state} today={today}
-                onToggle={id => toggleDate(id, today)}
-                onOpen={() => setView({ type: 'detail', habitId: h.id })} />
-            ))}
+        <div className="space-y-4 max-w-3xl">
+          <div className="flex justify-end mb-2">
+            <button onClick={() => setShowNew(true)} className="bg-accent text-base font-semibold px-4 py-2 rounded-lg text-sm hover:bg-yellow-500 transition">+ Добавить</button>
           </div>
-
-          {archivedHabits.length > 0 && (
-            <div>
-              <button onClick={() => setShowArchived(v => !v)} className="text-xs text-slate-500 hover:text-slate-300">
-                {showArchived ? '▾' : '▸'} архив ({archivedHabits.length})
-              </button>
-              {showArchived && (
-                <div className="space-y-2 mt-2">
-                  {archivedHabits.map(h => (
-                    <HabitRow key={h.id} habit={h} state={state} today={today}
-                      onToggle={id => toggleDate(id, today)}
-                      onOpen={() => setView({ type: 'detail', habitId: h.id })} />
-                  ))}
+          {activeHabits.map(h => {
+            const done = isDone(state.completions[h.id]?.[today]);
+            return (
+              <div key={h.id} className="bg-panel border border-border rounded-xl p-4 flex items-center gap-4">
+                <button onClick={() => toggleDate(h.id, today)} className={`w-10 h-10 rounded-full border-2 flex items-center justify-center shrink-0 transition ${done ? 'bg-accent border-accent text-base' : 'border-border text-transparent'}`}>
+                  ✓
+                </button>
+                <div className="flex-1 min-w-0">
+                  <div className="font-medium">{h.name}</div>
+                  <div className="text-xs text-textMuted mt-0.5">🔥 {currentStreak(h.id, state.completions, today)} дней подряд</div>
                 </div>
-              )}
-            </div>
-          )}
-
-          <button onClick={() => setShowNew(true)} aria-label="добавить привычку"
-            className="fixed right-5 bg-emerald-500 text-slate-950 rounded-full shadow-lg active:scale-95 transition"
-            style={{
-              width: 60, height: 60, bottom: 'max(84px, calc(env(safe-area-inset-bottom) + 64px))',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              fontSize: 30, fontWeight: 700, border: 'none', cursor: 'pointer', zIndex: 40
-            }}>
-            +
-          </button>
+                <button onClick={() => deleteHabit(h.id)} className="text-textMuted hover:text-danger px-2 text-sm">✕</button>
+              </div>
+            );
+          })}
           {showNew && <NewHabitModal onSave={addHabit} onClose={() => setShowNew(false)} />}
         </div>
       );
     }
 
-    /* ===================== WEIGHT VIEW ===================== */
-    function WeightChart({ entries, color = '#34d399' }) {
-      if (entries.length < 2) {
-        return <div className="text-slate-600 text-xs py-8 text-center">
-          {entries.length === 1 ? 'нужно ≥2 взвешиваний' : 'нет данных за период'}
-        </div>;
-      }
-      const W = 320, H = 180, PL = 40, PR = 10, PT = 12, PB = 22;
-      const pw = W - PL - PR, ph = H - PT - PB;
-      const all = entries.flatMap(p => [p.kg, p.ma].filter(v => v !== undefined));
-      const minY = Math.min(...all) - 0.5, maxY = Math.max(...all) + 0.5;
-      const rY = Math.max(0.5, maxY - minY);
-      const x = i => PL + (i / (entries.length - 1)) * pw;
-      const y = kg => PT + (1 - (kg - minY) / rY) * ph;
-      const rawPath = entries.map((p, i) => `${i ? 'L' : 'M'} ${x(i).toFixed(1)} ${y(p.kg).toFixed(1)}`).join(' ');
-      const maPts = entries.map((p, i) => p.ma !== undefined ? { i, v: p.ma } : null).filter(Boolean);
-      const maPath = maPts.length >= 2 ? maPts.map((p, k) => `${k ? 'L' : 'M'} ${x(p.i).toFixed(1)} ${y(p.v).toFixed(1)}`).join(' ') : '';
-      const ticks = [minY, minY + rY / 2, maxY];
-      return (
-        <svg viewBox={`0 0 ${W} ${H}`} className="w-full">
-          {ticks.map((v, i) => (
-            <g key={i}>
-              <line x1={PL} x2={W - PR} y1={y(v)} y2={y(v)} stroke="#1e293b" strokeDasharray="2 4" />
-              <text x={PL - 4} y={y(v) + 3} textAnchor="end" fontSize="9" fill="#64748b">{v.toFixed(1)}</text>
-            </g>
-          ))}
-          <path d={rawPath} fill="none" stroke="#475569" strokeWidth="1.2" />
-          {entries.map((p, i) => <circle key={p.date} cx={x(i)} cy={y(p.kg)} r={2} fill="#94a3b8" />)}
-          {maPath && <path d={maPath} fill="none" stroke={color} strokeWidth="2.2" />}
-          <text x={PL} y={H - 4} fontSize="9" fill="#64748b">{entries[0].date.slice(5)}</text>
-          <text x={W - PR} y={H - 4} textAnchor="end" fontSize="9" fill="#64748b">{entries[entries.length - 1].date.slice(5)}</text>
-        </svg>
-      );
-    }
-
-    function WeightTab({ sync, today }) {
-      const [period, setPeriod] = useState(30);
-      const [input, setInput] = useState('');
-      const [date, setDate] = useState(today);
-      const [err, setErr] = useState(null);
-      const from = addDays(today, -(period - 1));
-      const all = weightSeriesInRange(sync.state.weights, addDays(today, -3650), today);
-      const entries = weightSeriesInRange(sync.state.weights, from, today);
-      const withMA = weightMovingAvg(entries, 7);
-      const slope = slopePerWeek(entries);
-      const latest = all.length ? all[all.length - 1].kg : null;
-      const first = entries.length ? entries[0].kg : null;
-      const change = (latest != null && first != null && entries.length >= 2) ? latest - first : null;
-
-      async function add() {
-        const kg = Number(input.replace(',', '.'));
-        if (!Number.isFinite(kg) || kg < 20 || kg > 400) { setErr('вес 20–400 кг'); return; }
-        sync.setState(prev => ({
-          ...prev,
-          weights: { ...prev.weights, [date]: { kg, ts: Date.now() } },
-          weightDeleted: Object.fromEntries(Object.entries(prev.weightDeleted || {}).filter(([d]) => d !== date))
-        }));
-        setInput(''); setErr(null);
-      }
-      async function remove(d) {
-        if (!confirm(`удалить запись за ${d}?`)) return;
-        sync.setState(prev => {
-          const w = { ...prev.weights }; delete w[d];
-          return { ...prev, weights: w, weightDeleted: { ...(prev.weightDeleted || {}), [d]: Date.now() } };
-        });
-      }
-
-      const recent = [...all].reverse().slice(0, 10);
-
-      return (
-        <div className="p-4 space-y-4 pb-24">
-          <div className="flex items-center justify-between">
-            <h2 className="text-base font-semibold">вес</h2>
-            <PeriodSelector value={period} onChange={setPeriod} />
-          </div>
-
-          <div className="bg-slate-900 border border-slate-800 rounded-xl p-3">
-            {withMA.length >= 2
-              ? <WeightChart entries={withMA} />
-              : <div className="text-slate-600 text-xs py-8 text-center">внеси ≥2 взвешивания за период</div>}
-          </div>
-
-          {entries.length > 0 && (
-            <div className="grid grid-cols-3 gap-2">
-              <Stat label="текущий" value={latest != null ? latest.toFixed(1) : '—'} sub="кг" />
-              <Stat label={`Δ ${period}д`} value={change != null ? (change > 0 ? '+' : '') + change.toFixed(1) : '—'} sub="кг" />
-              <Stat label="тренд" value={slope != null ? (slope > 0 ? '+' : '') + slope.toFixed(2) : '—'} sub="кг/нед" />
-            </div>
-          )}
-
-          <div className="bg-slate-900 border border-slate-800 rounded-xl p-3 space-y-2">
-            <div className="text-xs text-slate-400">добавить взвешивание</div>
-            <div className="flex items-center gap-2">
-              <input type="date" value={date} max={today} onChange={e => setDate(e.target.value)}
-                className="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5 text-xs" />
-              <input placeholder="кг" value={input} inputMode="decimal" onChange={e => setInput(e.target.value)}
-                onKeyDown={e => e.key === 'Enter' && add()}
-                className="flex-1 bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-sm" />
-              <button onClick={add} className="bg-emerald-500 text-slate-950 font-medium rounded-lg px-3 py-1.5 text-sm active:scale-95 transition">+</button>
-            </div>
-            {err && <div className="text-amber-400 text-[11px]">{err}</div>}
-          </div>
-
-          {recent.length > 0 && (
-            <div className="bg-slate-900 border border-slate-800 rounded-xl p-3">
-              <div className="text-xs text-slate-400 mb-2">последние записи</div>
-              <ul className="space-y-1 text-sm">
-                {recent.map(e => (
-                  <li key={e.date} className="flex items-center justify-between py-1">
-                    <span className="text-slate-400 text-xs">{e.date}</span>
-                    <span className="font-medium">{e.kg.toFixed(1)} кг</span>
-                    <button onClick={() => remove(e.date)} className="text-slate-600 hover:text-red-400 text-xs px-1">✕</button>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-        </div>
-      );
-    }
-
-    /* ===================== KCAL VIEW ===================== */
-    function KcalChart({ entries, target, from, to }) {
-      if (!entries.length) {
-        return <div className="text-slate-600 text-xs py-8 text-center">нет данных за период</div>;
-      }
-      const W = 320, H = 180, PL = 40, PR = 10, PT = 12, PB = 22;
-      const pw = W - PL - PR, ph = H - PT - PB;
-      const maxY = Math.max(target, ...entries.map(e => e.value)) * 1.1;
-      const byDate = new Map(entries.map(e => [e.date, e.value]));
-      const days = [];
-      let cur = from;
-      while (cur <= to) { days.push(cur); cur = addDays(cur, 1); }
-      const bw = pw / Math.max(1, days.length);
-      const y = v => PT + (1 - v / maxY) * ph;
-      const yTarget = y(target);
-      return (
-        <svg viewBox={`0 0 ${W} ${H}`} className="w-full">
-          <line x1={PL} x2={W - PR} y1={yTarget} y2={yTarget} stroke="#fbbf24" strokeDasharray="3 3" opacity={0.6} />
-          <text x={W - PR} y={yTarget - 3} textAnchor="end" fontSize="8" fill="#fbbf24">{target}</text>
-          {[0, maxY / 2, maxY].map((v, i) => (
-            <g key={i}>
-              <line x1={PL} x2={W - PR} y1={y(v)} y2={y(v)} stroke="#1e293b" strokeDasharray="2 4" />
-              <text x={PL - 4} y={y(v) + 3} textAnchor="end" fontSize="9" fill="#64748b">{Math.round(v)}</text>
-            </g>
-          ))}
-          {days.map((d, i) => {
-            const v = byDate.get(d);
-            if (!v) return null;
-            const h = (v / maxY) * ph;
-            const over = v > target;
-            return (
-              <rect key={d}
-                x={PL + i * bw + 1} y={PT + ph - h}
-                width={Math.max(1, bw - 2)} height={h}
-                fill={over ? '#f87171' : '#34d399'} opacity={0.85} rx={1} />
-            );
-          })}
-          <text x={PL} y={H - 4} fontSize="9" fill="#64748b">{from.slice(5)}</text>
-          <text x={W - PR} y={H - 4} textAnchor="end" fontSize="9" fill="#64748b">{to.slice(5)}</text>
-        </svg>
-      );
-    }
-
-    function KcalTab({ sync, today }) {
-      const [period, setPeriod] = useState(30);
-      const [input, setInput] = useState('');
-      const [date, setDate] = useState(today);
-      const [err, setErr] = useState(null);
-      const target = sync.state.settings?.kcalTarget || 2200;
-      const from = addDays(today, -(period - 1));
-      const all = kcalSeriesInRange(sync.state.kcal, addDays(today, -3650), today);
-      const entries = kcalSeriesInRange(sync.state.kcal, from, today);
-      const todayVal = sync.state.kcal[today]?.value;
-      const avg7 = (() => {
-        const e = kcalSeriesInRange(sync.state.kcal, addDays(today, -6), today);
-        return e.length ? Math.round(e.reduce((a, x) => a + x.value, 0) / e.length) : null;
-      })();
-      const avgPeriod = entries.length ? Math.round(entries.reduce((a, x) => a + x.value, 0) / entries.length) : null;
-      const onTargetDays = entries.filter(e => Math.abs(e.value - target) <= target * 0.1).length;
-
-      async function add() {
-        const v = Number(input.replace(/\s/g, ''));
-        if (!Number.isFinite(v) || v < 500 || v > 15000) { setErr('ккал 500–15000'); return; }
-        sync.setState(prev => ({
-          ...prev,
-          kcal: { ...prev.kcal, [date]: { value: v, ts: Date.now() } },
-          kcalDeleted: Object.fromEntries(Object.entries(prev.kcalDeleted || {}).filter(([d]) => d !== date))
-        }));
-        setInput(''); setErr(null);
-      }
-      async function remove(d) {
-        if (!confirm(`удалить запись за ${d}?`)) return;
-        sync.setState(prev => {
-          const k = { ...prev.kcal }; delete k[d];
-          return { ...prev, kcal: k, kcalDeleted: { ...(prev.kcalDeleted || {}), [d]: Date.now() } };
-        });
-      }
-
-      const recent = [...all].reverse().slice(0, 10);
-
-      return (
-        <div className="p-4 space-y-4 pb-24">
-          <div className="flex items-center justify-between">
-            <h2 className="text-base font-semibold">калории</h2>
-            <PeriodSelector value={period} onChange={setPeriod} />
-          </div>
-
-          <div className="bg-slate-900 border border-slate-800 rounded-xl p-3">
-            <KcalChart entries={entries} target={target} from={from} to={today} />
-            <div className="text-[10px] text-slate-500 text-center mt-1">цель {target} ккал — пунктир</div>
-          </div>
-
-          <div className="grid grid-cols-3 gap-2">
-            <Stat label="сегодня" value={todayVal ?? '—'} sub="ккал" />
-            <Stat label="среднее 7д" value={avg7 ?? '—'} sub="ккал" />
-            <Stat label={`среднее ${period}д`} value={avgPeriod ?? '—'} sub={`${onTargetDays} в цель`} />
-          </div>
-
-          <div className="bg-slate-900 border border-slate-800 rounded-xl p-3 space-y-2">
-            <div className="text-xs text-slate-400">добавить запись</div>
-            <div className="flex items-center gap-2">
-              <input type="date" value={date} max={today} onChange={e => setDate(e.target.value)}
-                className="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5 text-xs" />
-              <input placeholder="ккал" value={input} inputMode="numeric" onChange={e => setInput(e.target.value)}
-                onKeyDown={e => e.key === 'Enter' && add()}
-                className="flex-1 bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-sm" />
-              <button onClick={add} className="bg-emerald-500 text-slate-950 font-medium rounded-lg px-3 py-1.5 text-sm active:scale-95 transition">+</button>
-            </div>
-            {err && <div className="text-amber-400 text-[11px]">{err}</div>}
-          </div>
-
-          {recent.length > 0 && (
-            <div className="bg-slate-900 border border-slate-800 rounded-xl p-3">
-              <div className="text-xs text-slate-400 mb-2">последние записи</div>
-              <ul className="space-y-1 text-sm">
-                {recent.map(e => (
-                  <li key={e.date} className="flex items-center justify-between py-1">
-                    <span className="text-slate-400 text-xs">{e.date}</span>
-                    <span className="font-medium">{e.value} ккал</span>
-                    <button onClick={() => remove(e.date)} className="text-slate-600 hover:text-red-400 text-xs px-1">✕</button>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-        </div>
-      );
-    }
-
-    /* ===================== HEALTH TAB (weight + kcal) ===================== */
     function HealthTab({ sync, today }) {
-      const [segment, setSegment] = useState('weight');
-      return (
-        <div className="p-4 pb-0">
-          <div className="flex gap-1 bg-slate-950 rounded-lg p-1 mb-2 max-w-xs">
-            <button onClick={() => setSegment('weight')}
-              className={`flex-1 text-xs py-1.5 rounded transition ${segment === 'weight' ? 'bg-slate-800 text-emerald-400' : 'text-slate-500'}`}>
-              ⚖ вес
-            </button>
-            <button onClick={() => setSegment('kcal')}
-              className={`flex-1 text-xs py-1.5 rounded transition ${segment === 'kcal' ? 'bg-slate-800 text-emerald-400' : 'text-slate-500'}`}>
-              🔥 ккал
-            </button>
-          </div>
-          {segment === 'weight' ? <WeightTab sync={sync} today={today} /> : <KcalTab sync={sync} today={today} />}
-        </div>
-      );
-    }
-
-    /* ===================== OVERVIEW TAB ===================== */
-    function OverviewTab({ sync, today }) {
-      const [period, setPeriod] = useState(30);
-      const from = addDays(today, -(period - 1));
       const state = sync.state;
-      const activeHabits = state.habits.filter(h => !h.archived);
+      const [wDate, setWDate] = useState(today);
+      const [wVal, setWVal] = useState('');
+      const [kDate, setKDate] = useState(today);
+      const [kVal, setKVal] = useState('');
 
-      const totalCompletions = activeHabits.reduce((sum, h) => sum + habitCompletionRate(h.id, state.completions, from, today), 0);
-      const avgRate = activeHabits.length ? totalCompletions / activeHabits.length : 0;
-
-      const weightEntries = weightSeriesInRange(state.weights, from, today);
-      const weightFirst = weightEntries[0]?.kg ?? null;
-      const weightLast = weightEntries[weightEntries.length - 1]?.kg ?? null;
-      const weightDelta = (weightFirst != null && weightLast != null && weightEntries.length >= 2) ? weightLast - weightFirst : null;
-
-      const kcalEntries = kcalSeriesInRange(state.kcal, from, today);
-      const kcalAvg = kcalEntries.length ? Math.round(kcalEntries.reduce((a, x) => a + x.value, 0) / kcalEntries.length) : null;
-      const kcalTarget = state.settings?.kcalTarget || 2200;
-      const kcalInTarget = kcalEntries.filter(e => Math.abs(e.value - kcalTarget) <= kcalTarget * 0.1).length;
+      const addWeight = () => {
+        const v = Number(wVal.replace(',', '.'));
+        if (v < 20 || v > 400) return;
+        sync.setState(prev => ({ ...prev, weights: { ...prev.weights, [wDate]: { kg: v, ts: Date.now() } } }));
+        setWVal('');
+      };
+      const addKcal = () => {
+        const v = Number(kVal);
+        if (v < 500 || v > 15000) return;
+        sync.setState(prev => ({ ...prev, kcal: { ...prev.kcal, [kDate]: { value: v, ts: Date.now() } } }));
+        setKVal('');
+      };
 
       return (
-        <div className="p-4 space-y-4 pb-24">
-          <div className="flex items-center justify-between">
-            <h2 className="text-base font-semibold">обзор</h2>
-            <PeriodSelector value={period} onChange={setPeriod} />
-          </div>
-
-          <div className="text-xs text-slate-500">
-            период: {from} → {today} ({period} {plural(period, 'день', 'дня', 'дней')})
-          </div>
-
-          <div className="grid grid-cols-2 gap-2">
-            <div className="bg-slate-900 border border-slate-800 rounded-xl p-3">
-              <div className="text-[10px] text-slate-500 mb-1">привычки</div>
-              <div className="text-lg font-semibold">{activeHabits.length ? Math.round(avgRate * 100) + '%' : '—'}</div>
-              <div className="text-[10px] text-slate-600">средний completion rate</div>
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <div className="bg-panel border border-border rounded-2xl p-5">
+            <h3 className="text-[11px] font-medium text-textMuted uppercase tracking-wider mb-4">Дневник веса</h3>
+            <div className="flex gap-2 mb-6">
+              <input type="date" value={wDate} onChange={e=>setWDate(e.target.value)} className="bg-base border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-accent" />
+              <input placeholder="кг" value={wVal} onChange={e=>setWVal(e.target.value)} className="flex-1 bg-base border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-accent w-20" />
+              <button onClick={addWeight} className="bg-accent text-base px-4 rounded-lg font-medium">ОК</button>
             </div>
-            <div className="bg-slate-900 border border-slate-800 rounded-xl p-3">
-              <div className="text-[10px] text-slate-500 mb-1">всего отметок</div>
-              <div className="text-lg font-semibold">{Math.round(totalCompletions)}</div>
-              <div className="text-[10px] text-slate-600">за период</div>
-            </div>
-            <div className="bg-slate-900 border border-slate-800 rounded-xl p-3">
-              <div className="text-[10px] text-slate-500 mb-1">вес Δ</div>
-              <div className={`text-lg font-semibold ${weightDelta == null ? '' : weightDelta < 0 ? 'text-emerald-400' : weightDelta > 0 ? 'text-amber-400' : ''}`}>
-                {weightDelta == null ? '—' : (weightDelta > 0 ? '+' : '') + weightDelta.toFixed(1)}
-              </div>
-              <div className="text-[10px] text-slate-600">кг за период · {weightEntries.length} взвеш.</div>
-            </div>
-            <div className="bg-slate-900 border border-slate-800 rounded-xl p-3">
-              <div className="text-[10px] text-slate-500 mb-1">ккал среднее</div>
-              <div className="text-lg font-semibold">{kcalAvg ?? '—'}</div>
-              <div className="text-[10px] text-slate-600">{kcalInTarget}/{kcalEntries.length} в цель</div>
+            <div className="space-y-2 max-h-64 overflow-auto pr-2">
+              {Object.entries(state.weights).reverse().map(([d, v]) => (
+                <div key={d} className="flex justify-between items-center text-sm border-b border-border pb-2">
+                  <span className="text-textMuted font-mono">{d}</span>
+                  <span className="font-medium">{v.kg} кг</span>
+                </div>
+              ))}
             </div>
           </div>
 
-          {activeHabits.length > 0 && (
-            <div className="bg-slate-900 border border-slate-800 rounded-xl p-3 space-y-2">
-              <div className="text-xs text-slate-400 mb-1">по привычкам</div>
-              {activeHabits.map(h => {
-                const rate = habitCompletionRate(h.id, state.completions, from, today);
-                const color = getColor(h.color);
-                const cur = currentStreak(h.id, state.completions, today);
-                return (
-                  <div key={h.id}>
-                    <div className="flex justify-between text-[11px] mb-0.5">
-                      <span className="truncate">{h.name}</span>
-                      <span className="text-slate-500 shrink-0 ml-2">{Math.round(rate * 100)}% · 🔥{cur}</span>
-                    </div>
-                    <div className="h-1.5 rounded-full bg-slate-800 overflow-hidden">
-                      <div className="h-full rounded-full transition-all"
-                        style={{ width: `${rate * 100}%`, background: color.hex }} />
-                    </div>
-                  </div>
-                );
-              })}
+          <div className="bg-panel border border-border rounded-2xl p-5">
+            <h3 className="text-[11px] font-medium text-textMuted uppercase tracking-wider mb-4">Дневник калорий</h3>
+            <div className="flex gap-2 mb-6">
+              <input type="date" value={kDate} onChange={e=>setKDate(e.target.value)} className="bg-base border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-accent" />
+              <input placeholder="ккал" value={kVal} onChange={e=>setKVal(e.target.value)} className="flex-1 bg-base border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-accent w-20" />
+              <button onClick={addKcal} className="bg-accent text-base px-4 rounded-lg font-medium">ОК</button>
             </div>
-          )}
-
-          {weightEntries.length >= 2 && (
-            <div className="bg-slate-900 border border-slate-800 rounded-xl p-3">
-              <div className="text-xs text-slate-400 mb-2">вес за период</div>
-              <WeightChart entries={weightMovingAvg(weightEntries, 7)} />
+            <div className="space-y-2 max-h-64 overflow-auto pr-2">
+              {Object.entries(state.kcal).reverse().map(([d, v]) => (
+                <div key={d} className="flex justify-between items-center text-sm border-b border-border pb-2">
+                  <span className="text-textMuted font-mono">{d}</span>
+                  <span className="font-medium text-accent">{v.value} ккал</span>
+                </div>
+              ))}
             </div>
-          )}
-
-          {kcalEntries.length > 0 && (
-            <div className="bg-slate-900 border border-slate-800 rounded-xl p-3">
-              <div className="text-xs text-slate-400 mb-2">калории за период</div>
-              <KcalChart entries={kcalEntries} target={kcalTarget} from={from} to={today} />
-            </div>
-          )}
+          </div>
         </div>
       );
     }
 
-    /* ===================== SETTINGS TAB ===================== */
     function SettingsTab({ sync, token, owner, onLogout }) {
-      const [showToken, setShowToken] = useState(false);
-      const [copied, setCopied] = useState(false);
       const [kcalInput, setKcalInput] = useState(String(sync.state.settings?.kcalTarget || 2200));
-      const [kcalSaved, setKcalSaved] = useState(false);
 
-      function copyToken() {
-        navigator.clipboard.writeText(token).then(() => {
-          setCopied(true); setTimeout(() => setCopied(false), 1500);
-        });
-      }
-
-      function saveKcalTarget() {
+      const saveKcal = () => {
         const v = Number(kcalInput);
-        if (!Number.isFinite(v) || v < 500 || v > 15000) return;
-        sync.setState(prev => ({
-          ...prev,
-          settings: { ...prev.settings, kcalTarget: v, updatedAt: Date.now() }
-        }));
-        setKcalSaved(true); setTimeout(() => setKcalSaved(false), 1500);
-      }
-
-      const habitCount = sync.state.habits.length;
-      const weightCount = Object.keys(sync.state.weights || {}).length;
-      const kcalCount = Object.keys(sync.state.kcal || {}).length;
+        if (!Number.isFinite(v)) return;
+        sync.setState(prev => ({ ...prev, settings: { ...prev.settings, kcalTarget: v, updatedAt: Date.now() } }));
+      };
 
       return (
-        <div className="p-4 space-y-4 pb-24">
-          <h2 className="text-base font-semibold">настройки</h2>
-
-          <section className="bg-slate-900 border border-slate-800 rounded-xl p-3 space-y-2">
-            <div className="text-xs text-slate-400">аккаунт</div>
-            <div className="flex items-center justify-between">
-              <div>
-                <div className="text-sm font-medium">@{owner}</div>
-                <a href={`https://github.com/${owner}/${REPO_NAME}`} target="_blank" rel="noopener"
-                  className="text-[11px] text-sky-400 hover:underline">
-                  {owner}/{REPO_NAME} ↗
-                </a>
-              </div>
-              <span className="text-[10px] text-emerald-500">● подключён</span>
+        <div className="space-y-6 max-w-2xl">
+          <div className="bg-panel border border-border rounded-2xl p-5">
+            <h3 className="text-[11px] font-medium text-textMuted uppercase tracking-wider mb-4">Синхронизация</h3>
+            <div className="flex items-center justify-between mb-4">
+              <div className="text-sm">@{owner}</div>
+              <a href={`https://github.com/${owner}/${REPO_NAME}`} target="_blank" className="text-xs text-accent hover:underline">Открыть репозиторий ↗</a>
             </div>
-          </section>
+            <div className="text-xs text-textMuted truncate bg-base p-2 rounded border border-border font-mono">{token}</div>
+          </div>
 
-          <section className="bg-slate-900 border border-slate-800 rounded-xl p-3 space-y-2">
-            <div className="text-xs text-slate-400">токен github</div>
-            <div className="flex items-center gap-2">
-              <code className="flex-1 text-xs font-mono text-slate-300 break-all">
-                {showToken ? token : `${token.slice(0, 8)}••••••••${token.slice(-4)}`}
-              </code>
-              <button onClick={() => setShowToken(v => !v)}
-                className="text-[11px] text-slate-400 hover:text-slate-200 px-2 py-1">
-                {showToken ? 'скрыть' : 'показать'}
+          <div className="bg-panel border border-border rounded-2xl p-5">
+            <h3 className="text-[11px] font-medium text-textMuted uppercase tracking-wider mb-4">Цель по калориям</h3>
+            <div className="flex gap-2">
+              <input type="number" value={kcalInput} onChange={e=>setKcalInput(e.target.value)} className="bg-base border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-accent w-32" />
+              <button onClick={saveKcal} className="bg-accent text-base px-4 rounded-lg font-medium">Сохранить</button>
+            </div>
+          </div>
+
+          <button onClick={onLogout} className="w-full bg-panel border border-danger/30 text-danger hover:bg-danger/10 py-3 rounded-xl transition">Отключить аккаунт</button>
+        </div>
+      );
+    }
+
+    function NewHabitModal({ onSave, onClose }) {
+      const [name, setName] = useState('');
+      return (
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center p-4 z-50" onClick={onClose}>
+          <div onClick={e=>e.stopPropagation()} className="bg-panel border border-border rounded-2xl p-5 w-full max-w-sm space-y-4">
+            <h2 className="font-semibold">Новая привычка</h2>
+            <input value={name} onChange={e=>setName(e.target.value)} autoFocus placeholder="Название" className="w-full bg-base border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-accent" />
+            <div className="flex gap-2">
+              <button onClick={onClose} className="flex-1 bg-base border border-border rounded-lg py-2 text-sm hover:bg-border/50">Отмена</button>
+              <button onClick={() => { if(name.trim()) onSave({ id: crypto.randomUUID(), name: name.trim(), createdAt: isoDate(), updatedAt: Date.now(), archived: false }); }} className="flex-1 bg-accent text-base font-medium rounded-lg py-2">Создать</button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    function AuthScreen({ onReady }) {
+      const [token, setToken] = useState('');
+      const [busy, setBusy] = useState(false);
+      const [err, setErr] = useState(null);
+
+      async function submit(e) {
+        e.preventDefault();
+        if (!token.trim()) return;
+        setBusy(true); setErr(null);
+        try {
+          const user = await ghVerify(token);
+          localStorage.setItem(LS_TOKEN, token);
+          localStorage.setItem(LS_OWNER, user.login);
+          onReady(token, user.login);
+        } catch (e) { setErr(e.message); }
+        finally { setBusy(false); }
+      }
+
+      return (
+        <div className="min-h-screen flex items-center justify-center p-4">
+          <div className="w-full max-w-sm bg-panel border border-border rounded-2xl p-6 shadow-2xl">
+            <h1 className="text-2xl font-bold mb-1">Трекер</h1>
+            <p className="text-xs text-textMuted mb-6">Войди через GitHub</p>
+            <form onSubmit={submit} className="space-y-4">
+              <input type="password" value={token} onChange={e=>setToken(e.target.value)} placeholder="ghp_..." className="w-full bg-base border border-border rounded-lg px-3 py-2 text-sm font-mono outline-none focus:border-accent" />
+              {err && <div className="text-danger text-xs">{err}</div>}
+              <button type="submit" disabled={busy} className="w-full bg-accent text-base font-semibold rounded-lg py-2.5 hover:bg-yellow-500 transition disabled:opacity-50">
+                {busy ? '...' : 'Подключить'}
               </button>
-              <button onClick={copyToken}
-                className="text-[11px] text-emerald-400 hover:text-emerald-300 px-2 py-1">
-                {copied ? '✓' : 'копировать'}
-              </button>
-            </div>
-            <div className="text-[10px] text-slate-600">
-              токен хранится в localStorage этого браузера. при следующем открытии сайта вводить не нужно.
-            </div>
-          </section>
-
-          <section className="bg-slate-900 border border-slate-800 rounded-xl p-3 space-y-2">
-            <div className="text-xs text-slate-400">синхронизация</div>
-            <div className="flex items-center justify-between text-xs">
-              <span className="text-slate-400">статус</span>
-              <span className={sync.error ? 'text-amber-400' : 'text-emerald-400'}>
-                {sync.error ? '⚠ ' + sync.error : sync.syncing ? '↻ синхронизация…' : '✓ синхронизировано'}
-              </span>
-            </div>
-            <div className="flex items-center justify-between text-xs">
-              <span className="text-slate-400">последняя</span>
-              <span className="text-slate-300">{sync.lastSync ? relativeTime(sync.lastSync) + ' назад' : '—'}</span>
-            </div>
-            <button onClick={sync.forceSync} disabled={sync.syncing}
-              className="w-full bg-slate-800 hover:bg-slate-700 rounded-lg py-2 text-sm transition disabled:opacity-50">
-              синхронизировать сейчас
-            </button>
-          </section>
-
-          <section className="bg-slate-900 border border-slate-800 rounded-xl p-3 space-y-2">
-            <div className="text-xs text-slate-400">цель по калориям</div>
-            <div className="flex items-center gap-2">
-              <input type="number" value={kcalInput} onChange={e => setKcalInput(e.target.value)}
-                className="flex-1 bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-sm" />
-              <span className="text-xs text-slate-500">ккал</span>
-              <button onClick={saveKcalTarget}
-                className="bg-emerald-500 text-slate-950 font-medium rounded-lg px-3 py-1.5 text-sm active:scale-95 transition">
-                {kcalSaved ? '✓' : 'сохранить'}
-              </button>
-            </div>
-            <div className="text-[10px] text-slate-600">используется в графике калорий и в обзоре</div>
-          </section>
-
-          <section className="bg-slate-900 border border-slate-800 rounded-xl p-3 space-y-1">
-            <div className="text-xs text-slate-400 mb-1">данные</div>
-            <div className="flex justify-between text-xs"><span className="text-slate-400">привычек</span><span>{habitCount}</span></div>
-            <div className="flex justify-between text-xs"><span className="text-slate-400">взвешиваний</span><span>{weightCount}</span></div>
-            <div className="flex justify-between text-xs"><span className="text-slate-400">записей калорий</span><span>{kcalCount}</span></div>
-          </section>
-
-          <button onClick={onLogout}
-            className="w-full bg-red-950/40 border border-red-900/60 text-red-300 hover:bg-red-950/60 rounded-xl py-3 text-sm transition">
-            отключить аккаунт
-          </button>
-          <p className="text-[10px] text-slate-600 text-center leading-relaxed">
-            отключение очистит токен в этом браузере. данные в репозитории останутся.
-          </p>
+            </form>
+          </div>
         </div>
       );
     }
 
     /* ===================== MAIN APP ===================== */
-    const TABS = [
-      { id: 'habits', label: 'привычки', icon: '◐' },
-      { id: 'health', label: 'здоровье', icon: '⚖' },
-      { id: 'overview', label: 'обзор', icon: '☷' },
-      { id: 'settings', label: 'ещё', icon: '⚙' }
+    const NAV = [
+      { id: 'dash', label: 'Дашборд', icon: IconDash },
+      { id: 'habits', label: 'Привычки', icon: IconHabits },
+      { id: 'health', label: 'Здоровье', icon: IconHealth },
+      { id: 'settings', label: 'Настройки', icon: IconSettings }
     ];
 
     function MainApp({ token, owner, onLogout }) {
       const sync = useHabitSync(token, owner);
-      const [tab, setTab] = useState('habits');
+      const [tab, setTab] = useState('dash');
       const today = isoDate();
+      const [time, setTime] = useState(new Date());
 
-      if (sync.loading) {
-        return (
-          <div className="min-h-full flex flex-col items-center justify-center text-slate-500 text-sm gap-2">
-            <div>{sync.repoStatus === 'creating' ? 'создаю приватный репозиторий…' : 'синхронизация…'}</div>
-            <div className="text-[11px] text-slate-600">{owner}/{REPO_NAME}</div>
-          </div>
-        );
-      }
+      useEffect(() => {
+        const iv = setInterval(() => setTime(new Date()), 1000);
+        return () => clearInterval(iv);
+      }, []);
+
+      if (sync.loading) return <div className="min-h-screen flex items-center justify-center text-textMuted text-sm">Синхронизация...</div>;
 
       return (
-        <div className="min-h-full max-w-md mx-auto">
-          <div className="flex items-center justify-between p-4 pb-2">
-            <h1 className="text-lg font-semibold">
-              {tab === 'habits' ? 'привычки' : tab === 'health' ? 'здоровье' : tab === 'overview' ? 'обзор' : 'настройки'}
-            </h1>
-            <div className="flex items-center gap-1">
+        <div className="flex h-screen overflow-hidden bg-base text-white">
+          <aside className="hidden md:flex flex-col w-64 border-r border-border bg-[#0a0a0a]">
+            <div className="p-6">
+              <h1 className="text-xl font-bold flex items-center gap-2">Трекер <span className="text-accent">●</span></h1>
+            </div>
+
+            <div className="mx-4 mb-6 bg-panel border border-border rounded-xl p-4 text-center">
+              <div className="text-2xl font-mono font-bold tracking-tight mb-1">{time.toLocaleTimeString('ru-RU', {hour12:false})}</div>
+              <div className="text-xs text-textMuted capitalize">{time.toLocaleDateString('ru-RU', { weekday: 'long', day: 'numeric', month: 'long' })}</div>
+            </div>
+
+            <nav className="flex-1 px-3 space-y-1">
+              {NAV.map(item => {
+                const active = tab === item.id;
+                return (
+                  <button key={item.id} onClick={() => setTab(item.id)}
+                    className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition ${active ? 'bg-accent/10 text-accent font-medium' : 'text-textMuted hover:bg-panel hover:text-white'}`}>
+                    <item.icon /> {item.label}
+                  </button>
+                );
+              })}
+            </nav>
+
+            <div className="p-4 border-t border-border">
+              <div className="text-[10px] text-textMuted leading-relaxed">
+                Данные хранятся в приватном репозитории<br/>
+                <span className="text-accent">@{owner}/{REPO_NAME}</span>
+              </div>
+            </div>
+          </aside>
+
+          <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
+            <header className="flex items-center justify-between p-6 pb-4">
+              <div>
+                <h2 className="text-2xl font-bold flex items-center gap-2">Привет, @{owner} 👋</h2>
+                <p className="text-xs text-textMuted mt-1">Твой прогресс и здоровье</p>
+              </div>
               <SyncBadge syncing={sync.syncing} lastSync={sync.lastSync} error={sync.error} onSync={sync.forceSync} />
-            </div>
-          </div>
+            </header>
 
-          {sync.error && (
-            <div className="mx-4 mb-2 bg-amber-950/40 border border-amber-900/60 text-amber-200 text-xs rounded-lg px-3 py-2">
-              {sync.error}
+            <div className="flex-1 overflow-auto p-6 pt-2">
+              {sync.error && <div className="bg-danger/10 border border-danger/20 text-danger text-sm px-4 py-3 rounded-xl mb-6">{sync.error}</div>}
+              
+              {tab === 'dash' && <DashboardTab sync={sync} today={today} />}
+              {tab === 'habits' && <HabitsTab sync={sync} today={today} />}
+              {tab === 'health' && <HealthTab sync={sync} today={today} />}
+              {tab === 'settings' && <SettingsTab sync={sync} token={token} owner={owner} onLogout={onLogout} />}
             </div>
-          )}
+          </main>
 
-          <div className="pb-20">
-            {tab === 'habits' && <HabitsTab sync={sync} today={today} />}
-            {tab === 'health' && <HealthTab sync={sync} today={today} />}
-            {tab === 'overview' && <OverviewTab sync={sync} today={today} />}
-            {tab === 'settings' && <SettingsTab sync={sync} token={token} owner={owner} onLogout={onLogout} />}
-          </div>
-
-          <nav className="fixed bottom-0 left-0 right-0 border-t border-slate-800 bg-slate-950/95 backdrop-blur z-30"
-            style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}>
-            <div className="max-w-md mx-auto grid grid-cols-4">
-              {TABS.map(t => (
-                <button key={t.id} onClick={() => setTab(t.id)}
-                  className={`py-3 text-[11px] flex flex-col items-center gap-0.5 transition ${tab === t.id ? 'text-emerald-400' : 'text-slate-500'}`}>
-                  <span className="text-base leading-none">{t.icon}</span>
-                  {t.label}
-                </button>
-              ))}
-            </div>
+          <nav className="md:hidden fixed bottom-0 w-full bg-panel border-t border-border flex justify-around pb-safe z-50">
+            {NAV.map(item => (
+              <button key={item.id} onClick={() => setTab(item.id)} className={`flex flex-col items-center p-3 text-[10px] ${tab === item.id ? 'text-accent' : 'text-textMuted'}`}>
+                <item.icon /> <span className="mt-1">{item.label}</span>
+              </button>
+            ))}
           </nav>
         </div>
       );
     }
 
-    /* ===================== ROOT ===================== */
     function App() {
       const [token, setToken] = useState(null);
       const [owner, setOwner] = useState(null);
       const [ready, setReady] = useState(false);
-      const [authError, setAuthError] = useState(null);
 
       useEffect(() => {
         const t = localStorage.getItem(LS_TOKEN);
@@ -1357,25 +815,12 @@
         setReady(true);
       }, []);
 
-      function logout() {
-        localStorage.removeItem(LS_TOKEN);
-        localStorage.removeItem(LS_OWNER);
-        setToken(null); setOwner(null);
-        window.location.reload();
-      }
-
-      if (!ready) return <div className="min-h-full flex items-center justify-center text-slate-500 text-sm">загрузка…</div>;
-      if (!token || !owner) return <AuthScreen onReady={(t, o) => { setToken(t); setOwner(o); }} initialError={authError} />;
-      return <MainApp token={token} owner={owner} onLogout={logout} />;
+      if (!ready) return null;
+      if (!token || !owner) return <AuthScreen onReady={(t, o) => { setToken(t); setOwner(o); }} />;
+      return <MainApp token={token} owner={owner} onLogout={() => { localStorage.clear(); window.location.reload(); }} />;
     }
 
     ReactDOM.createRoot(document.getElementById('root')).render(<App />);
-
-    if ('serviceWorker' in navigator) {
-      window.addEventListener('load', () => {
-        navigator.serviceWorker.register('service-worker.js').catch(() => {});
-      });
-    }
   </script>
 </body>
 </html>
