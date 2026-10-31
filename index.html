@@ -71,11 +71,23 @@
       return `${Math.floor(s / 86400)} д`;
     }
 
-    /* ===================== TYPES ===================== */
+    /* ===================== UTIL ===================== */
     function isDone(val) {
       if (val === true) return true;
       if (val && typeof val === 'object') return val.on === true;
       return false;
+    }
+    function b64encodeUnicode(str) {
+      const bytes = new TextEncoder().encode(str);
+      let bin = '';
+      for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+      return btoa(bin);
+    }
+    function b64decodeUnicode(b64) {
+      const bin = atob(b64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      return new TextDecoder().decode(bytes);
     }
 
     /* ===================== ANALYSIS ===================== */
@@ -115,56 +127,81 @@
     const COLOR_KEYS = Object.keys(COLORS);
     const getColor = id => COLORS[id] || COLORS.emerald;
 
-    /* ===================== GITHUB GIST SYNC ===================== */
+    /* ===================== GITHUB REPO SYNC ===================== */
     const GH = 'https://api.github.com';
+    const REPO_NAME = 'habits-tracker-data';
+    const FILE_PATH = 'habits.json';
+
     function ghHeaders(token) {
-      return { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json' };
+      return {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github+json',
+        'Content-Type': 'application/json',
+        'X-GitHub-Api-Version': '2022-11-28'
+      };
     }
 
     async function ghVerify(token) {
       const r = await fetch(`${GH}/user`, { headers: ghHeaders(token) });
       if (r.status === 401) throw new Error('неверный токен или истёк');
-      if (!r.ok) throw new Error(`github ${r.status}`);
-      return r.json();
-    }
-    async function ghGetGist(token, id) {
-      const r = await fetch(`${GH}/gists/${id}`, { headers: ghHeaders(token) });
-      if (!r.ok) throw new Error(`gist ${r.status}`);
-      return r.json();
-    }
-    async function ghListGists(token) {
-      const r = await fetch(`${GH}/gists?per_page=100`, { headers: ghHeaders(token) });
-      if (!r.ok) throw new Error(`list ${r.status}`);
-      return r.json();
-    }
-    async function ghCreateGist(token, data) {
-      const r = await fetch(`${GH}/gists`, {
-        method: 'POST', headers: ghHeaders(token),
-        body: JSON.stringify({
-          description: 'habits-tracker-data',
-          public: false,
-          files: { 'habits.json': { content: JSON.stringify(data) } }
-        })
-      });
-      if (!r.ok) throw new Error(`create ${r.status}`);
-      return r.json();
-    }
-    async function ghUpdateGist(token, id, data) {
-      const r = await fetch(`${GH}/gists/${id}`, {
-        method: 'PATCH', headers: ghHeaders(token),
-        body: JSON.stringify({ files: { 'habits.json': { content: JSON.stringify(data) } } })
-      });
-      if (!r.ok) throw new Error(`update ${r.status}`);
+      if (!r.ok) throw new Error(`github /user: ${r.status}`);
       return r.json();
     }
 
-    async function ghFindOrCreate(token) {
-      const list = await ghListGists(token);
-      for (const g of list) {
-        if (g.description === 'habits-tracker-data' && g.files?.['habits.json']) return g.id;
+    async function ghGetRepo(token, owner, name) {
+      const r = await fetch(`${GH}/repos/${owner}/${name}`, { headers: ghHeaders(token) });
+      if (r.status === 404) return null;
+      if (!r.ok) throw new Error(`repo ${r.status}`);
+      return r.json();
+    }
+
+    async function ghCreateRepo(token, name) {
+      const r = await fetch(`${GH}/user/repos`, {
+        method: 'POST', headers: ghHeaders(token),
+        body: JSON.stringify({
+          name,
+          private: true,
+          auto_init: true,
+          description: 'Habits tracker data (do not rename — app relies on this name)'
+        })
+      });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        const msg = err?.message || `create repo ${r.status}`;
+        throw new Error(msg + ' — создай приватный репозиторий вручную или используй классический токен со scope repo');
       }
-      const created = await ghCreateGist(token, { habits: [], completions: {}, deleted: {} });
-      return created.id;
+      return r.json();
+    }
+
+    async function ghGetFile(token, owner, name, path) {
+      const r = await fetch(`${GH}/repos/${owner}/${name}/contents/${path}`, { headers: ghHeaders(token) });
+      if (r.status === 404) return null;
+      if (!r.ok) throw new Error(`file ${r.status}`);
+      const data = await r.json();
+      if (Array.isArray(data)) throw new Error('ожидался файл, пришёл каталог');
+      const b64 = (data.content || '').replace(/\s/g, '');
+      const content = b64decodeUnicode(b64);
+      return { content, sha: data.sha };
+    }
+
+    async function ghPutFile(token, owner, name, path, content, sha) {
+      const body = {
+        message: `habits update ${new Date().toISOString()}`,
+        content: b64encodeUnicode(content)
+      };
+      if (sha) body.sha = sha;
+      const r = await fetch(`${GH}/repos/${owner}/${name}/contents/${path}`, {
+        method: 'PUT', headers: ghHeaders(token),
+        body: JSON.stringify(body)
+      });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        const msg = err?.message || `put ${r.status}`;
+        const e = new Error(msg);
+        e.status = r.status;
+        throw e;
+      }
+      return r.json();
     }
 
     function emptyState() { return { habits: [], completions: {}, deleted: {} }; }
@@ -196,39 +233,62 @@
       return { habits: [...habitMap.values()], completions: comp, deleted };
     }
 
-    function useHabitSync(token, gistId, setGistId) {
+    function useHabitSync(token, owner) {
       const [state, setState] = useState(emptyState);
       const [loading, setLoading] = useState(true);
       const [syncing, setSyncing] = useState(false);
       const [lastSync, setLastSync] = useState(null);
       const [error, setError] = useState(null);
+      const [repoStatus, setRepoStatus] = useState('pending');
 
       const stateRef = useRef(state); stateRef.current = state;
-      const gistIdRef = useRef(gistId); gistIdRef.current = gistId;
+      const lastShaRef = useRef(null);
       const writeTimer = useRef(null);
-      const lastRemoteAt = useRef(0);
       const initialised = useRef(false);
 
-      // init
+      // init: ensure repo, ensure file, merge with local
       useEffect(() => {
-        if (!token) return;
+        if (!token || !owner) return;
         let alive = true;
         (async () => {
-          setLoading(true); setError(null);
+          setLoading(true); setError(null); setRepoStatus('pending');
           try {
-            let gid = gistId;
-            if (!gid) { gid = await ghFindOrCreate(token); if (alive) setGistId(gid); }
-            const gist = await ghGetGist(token, gid);
-            const raw = gist.files?.['habits.json']?.content;
-            const remote = raw ? JSON.parse(raw) : emptyState();
-            const merged = mergeStates(stateRef.current, remote);
+            // 1. ensure repo
+            let repo = await ghGetRepo(token, owner, REPO_NAME);
+            if (!repo) {
+              setRepoStatus('creating');
+              repo = await ghCreateRepo(token, REPO_NAME);
+            }
+            if (!repo.private) {
+              throw new Error(`репозиторий ${owner}/${REPO_NAME} существует и публичный — сделай его приватным или удали`);
+            }
+            setRepoStatus('ready');
+
+            // 2. read file
+            const file = await ghGetFile(token, owner, REPO_NAME, FILE_PATH);
+
+            let merged = stateRef.current;
+            if (file) {
+              const remote = JSON.parse(file.content);
+              merged = mergeStates(stateRef.current, remote);
+              lastShaRef.current = file.sha;
+            }
+
             if (alive) {
               setState(merged);
               setLastSync(Date.now());
-              lastRemoteAt.current = new Date(gist.updated_at).getTime();
               initialised.current = true;
             }
-            await ghUpdateGist(token, gid, merged);
+
+            // 3. write back if file missing or changed
+            if (!file) {
+              const res = await ghPutFile(token, owner, REPO_NAME, FILE_PATH, JSON.stringify(merged), null);
+              lastShaRef.current = res?.content?.sha ?? null;
+            } else if (JSON.stringify(merged) !== file.content) {
+              const res = await ghPutFile(token, owner, REPO_NAME, FILE_PATH, JSON.stringify(merged), file.sha);
+              lastShaRef.current = res?.content?.sha ?? null;
+              if (alive) setLastSync(Date.now());
+            }
           } catch (e) {
             if (alive) setError(e.message);
           } finally {
@@ -236,44 +296,59 @@
           }
         })();
         return () => { alive = false; };
-      }, [token]);
+      }, [token, owner]);
 
-      // debounced write on change
+      // debounced write: read-modify-write with retry on 409
       useEffect(() => {
-        if (!token || !gistIdRef.current || !initialised.current) return;
+        if (!token || !owner || !initialised.current) return;
         if (writeTimer.current) clearTimeout(writeTimer.current);
         writeTimer.current = setTimeout(async () => {
           setSyncing(true);
           try {
-            await ghUpdateGist(token, gistIdRef.current, stateRef.current);
-            setLastSync(Date.now());
-            setError(null);
+            const local = stateRef.current;
+            for (let attempt = 0; attempt < 2; attempt++) {
+              const cur = await ghGetFile(token, owner, REPO_NAME, FILE_PATH);
+              let toWrite = local;
+              if (cur && cur.sha !== lastShaRef.current) {
+                const remote = JSON.parse(cur.content);
+                toWrite = mergeStates(local, remote);
+              }
+              try {
+                const res = await ghPutFile(token, owner, REPO_NAME, FILE_PATH, JSON.stringify(toWrite), cur?.sha ?? null);
+                lastShaRef.current = res?.content?.sha ?? null;
+                if (JSON.stringify(toWrite) !== JSON.stringify(local)) {
+                  setState(toWrite);
+                }
+                setLastSync(Date.now());
+                setError(null);
+                break;
+              } catch (e) {
+                if (attempt === 0 && (e.status === 409 || e.status === 422)) continue;
+                throw e;
+              }
+            }
           } catch (e) { setError(e.message); }
           finally { setSyncing(false); }
         }, 1500);
         return () => { if (writeTimer.current) clearTimeout(writeTimer.current); };
-      }, [state, token]);
+      }, [state, token, owner]);
 
-      // poll remote
+      // poll remote by sha
       useEffect(() => {
-        if (!token || !gistId) return;
+        if (!token || !owner) return;
         let alive = true;
         async function poll() {
           if (document.hidden || !alive) return;
           try {
-            const gist = await ghGetGist(token, gistId);
-            const remoteTs = new Date(gist.updated_at).getTime();
-            if (remoteTs > lastRemoteAt.current) {
-              const raw = gist.files?.['habits.json']?.content;
-              if (raw) {
-                const remote = JSON.parse(raw);
-                const merged = mergeStates(stateRef.current, remote);
-                if (alive) {
-                  setState(merged);
-                  setLastSync(Date.now());
-                }
+            const cur = await ghGetFile(token, owner, REPO_NAME, FILE_PATH);
+            if (cur && cur.sha !== lastShaRef.current) {
+              const remote = JSON.parse(cur.content);
+              const merged = mergeStates(stateRef.current, remote);
+              lastShaRef.current = cur.sha;
+              if (alive) {
+                setState(merged);
+                setLastSync(Date.now());
               }
-              lastRemoteAt.current = remoteTs;
             }
           } catch { /* silent, retry next tick */ }
         }
@@ -285,37 +360,35 @@
           clearInterval(iv);
           document.removeEventListener('visibilitychange', onVis);
         };
-      }, [token, gistId]);
+      }, [token, owner]);
 
       async function forceSync() {
-        if (!token || !gistId) return;
+        if (!token || !owner) return;
         setSyncing(true);
         try {
-          const gist = await ghGetGist(token, gistId);
-          const raw = gist.files?.['habits.json']?.content;
-          const remote = raw ? JSON.parse(raw) : emptyState();
-          const merged = mergeStates(stateRef.current, remote);
+          const cur = await ghGetFile(token, owner, REPO_NAME, FILE_PATH);
+          let merged = stateRef.current;
+          let sha = null;
+          if (cur) {
+            const remote = JSON.parse(cur.content);
+            merged = mergeStates(stateRef.current, remote);
+            sha = cur.sha;
+          }
+          const res = await ghPutFile(token, owner, REPO_NAME, FILE_PATH, JSON.stringify(merged), sha);
+          lastShaRef.current = res?.content?.sha ?? null;
           setState(merged);
-          await ghUpdateGist(token, gistId, merged);
-          lastRemoteAt.current = new Date(gist.updated_at).getTime();
           setLastSync(Date.now());
           setError(null);
         } catch (e) { setError(e.message); }
         finally { setSyncing(false); }
       }
 
-      return { state, setState, loading, syncing, lastSync, error, forceSync };
+      return { state, setState, loading, syncing, lastSync, error, forceSync, repoStatus };
     }
 
-    /* ===================== STORAGE ===================== */
+    /* ===================== LOCAL STORAGE ===================== */
     const LS_TOKEN = 'habits_gh_token_v1';
-    const LS_GIST = 'habits_gh_gist_v1';
     const LS_OWNER = 'habits_gh_owner_v1';
-
-    async function hashToken(t) {
-      const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(t));
-      return [...new Uint8Array(buf)].slice(0, 8).map(b => b.toString(16).padStart(2, '0')).join('');
-    }
 
     /* ===================== AUTH SCREEN ===================== */
     function AuthScreen({ onReady }) {
@@ -330,15 +403,9 @@
         setErr(null); setBusy(true);
         try {
           const user = await ghVerify(t);
-          const h = await hashToken(t);
-          const prevOwner = localStorage.getItem(LS_OWNER);
-          if (prevOwner && prevOwner !== h) {
-            // другой пользователь на этом устройстве — сбрасываем локальные данные
-            localStorage.removeItem(LS_GIST);
-          }
-          localStorage.setItem(LS_OWNER, h);
           localStorage.setItem(LS_TOKEN, t);
-          onReady(t);
+          localStorage.setItem(LS_OWNER, user.login);
+          onReady(t, user.login);
         } catch (e) {
           setErr(e.message);
         } finally { setBusy(false); }
@@ -349,12 +416,12 @@
           <div className="w-full max-w-sm">
             <div className="text-center mb-6">
               <h1 className="text-2xl font-bold">Habits</h1>
-              <p className="text-slate-500 text-xs mt-1">синхронизация между устройствами через GitHub</p>
+              <p className="text-slate-500 text-xs mt-1">данные — в приватном репозитории на твоём github</p>
             </div>
             <form onSubmit={submit} className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-3">
-              <label className="block text-xs text-slate-400">github token (scope: gist)
+              <label className="block text-xs text-slate-400">github token
                 <input type="password" value={token} onChange={e => setToken(e.target.value)}
-                  placeholder="ghp_…" autoCapitalize="none" autoCorrect="off" spellCheck={false}
+                  placeholder="ghp_… / github_pat_…" autoCapitalize="none" autoCorrect="off" spellCheck={false}
                   className="mt-1 w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm font-mono focus:border-emerald-500 outline-none" />
               </label>
               {err && <div className="text-amber-400 text-xs">{err}</div>}
@@ -366,10 +433,11 @@
                 <div>как получить токен:</div>
                 <ol className="list-decimal list-inside space-y-0.5 text-slate-400">
                   <li>github.com/settings/tokens → generate new (classic)</li>
-                  <li>отметь только scope <span className="font-mono text-emerald-400">gist</span></li>
+                  <li>отметь scope <span className="font-mono text-emerald-400">repo</span></li>
                   <li>скопируй и вставь сюда</li>
                 </ol>
-                <div className="pt-1">на втором устройстве вводишь тот же токен — данные синхронизируются через приватный gist на твоём аккаунте.</div>
+                <div className="pt-1">приложение создаст приватный репозиторий <span className="font-mono text-emerald-400">habits-tracker-data</span> и будет хранить данные там.</div>
+                <div>на втором устройстве — тот же токен.</div>
               </div>
             </form>
           </div>
@@ -377,7 +445,7 @@
       );
     }
 
-    /* ===================== SYNC INDICATOR ===================== */
+    /* ===================== SYNC BADGE ===================== */
     function SyncBadge({ syncing, lastSync, error, onSync }) {
       return (
         <button onClick={onSync} title={error || (lastSync ? 'обновлено ' + relativeTime(lastSync) : '')}
@@ -462,7 +530,7 @@
       );
     }
 
-    /* ===================== COMPONENTS ===================== */
+    /* ===================== STAT ===================== */
     function Stat({ label, value }) {
       return (
         <div className="bg-slate-900 border border-slate-800 rounded-xl p-3 text-center">
@@ -472,6 +540,7 @@
       );
     }
 
+    /* ===================== HABIT ROW ===================== */
     function HabitRow({ habit, state, today, onToggle, onOpen }) {
       const color = getColor(habit.color);
       const done = isDone(state.completions[habit.id]?.[today]);
@@ -501,6 +570,7 @@
       );
     }
 
+    /* ===================== HABIT DETAIL ===================== */
     function HabitDetail({ habit, state, today, onBack, onToggleDate, onDelete, onArchive }) {
       const color = getColor(habit.color);
       const streak = currentStreak(habit.id, state.completions, today);
@@ -543,6 +613,7 @@
       );
     }
 
+    /* ===================== NEW HABIT MODAL ===================== */
     function NewHabitModal({ onSave, onClose }) {
       const [name, setName] = useState('');
       const [color, setColor] = useState('emerald');
@@ -584,8 +655,8 @@
     }
 
     /* ===================== MAIN APP ===================== */
-    function MainApp({ token, gistId, setGistId, onLogout }) {
-      const sync = useHabitSync(token, gistId, setGistId);
+    function MainApp({ token, owner, onLogout }) {
+      const sync = useHabitSync(token, owner);
       const [view, setView] = useState({ type: 'list' });
       const [showNew, setShowNew] = useState(false);
       const [showArchived, setShowArchived] = useState(false);
@@ -634,7 +705,12 @@
       }
 
       if (sync.loading) {
-        return <div className="min-h-full flex items-center justify-center text-slate-500 text-sm">синхронизация…</div>;
+        return (
+          <div className="min-h-full flex flex-col items-center justify-center text-slate-500 text-sm gap-2">
+            <div>{sync.repoStatus === 'creating' ? 'создаю приватный репозиторий…' : 'синхронизация…'}</div>
+            <div className="text-[11px] text-slate-600">{owner}/{REPO_NAME}</div>
+          </div>
+        );
       }
 
       if (view.type === 'detail') {
@@ -662,9 +738,14 @@
                   <button onClick={() => setShowMenu(v => !v)}
                     className="text-slate-400 hover:text-slate-200 text-lg px-2 py-1">⋯</button>
                   {showMenu && (
-                    <div className="absolute right-0 top-9 bg-slate-900 border border-slate-800 rounded-lg shadow-lg z-30 w-48">
+                    <div className="absolute right-0 top-9 bg-slate-900 border border-slate-800 rounded-lg shadow-lg z-30 w-52">
+                      <a href={`https://github.com/${owner}/${REPO_NAME}`} target="_blank" rel="noopener"
+                        onClick={() => setShowMenu(false)}
+                        className="block text-left text-xs px-3 py-2 hover:bg-slate-800 rounded-t-lg text-slate-300">
+                        открыть репозиторий
+                      </a>
                       <button onClick={() => { setShowMenu(false); onLogout(); }}
-                        className="w-full text-left text-xs px-3 py-2 hover:bg-slate-800 rounded-lg text-red-300">
+                        className="w-full text-left text-xs px-3 py-2 hover:bg-slate-800 rounded-b-lg text-red-300">
                         отключить аккаунт
                       </button>
                     </div>
@@ -725,7 +806,7 @@
             )}
 
             <p className="text-[10px] text-slate-600 text-center leading-relaxed pt-2">
-              данные синхронизируются через приватный gist на твоём github-аккаунте
+              данные — в приватном репозитории <span className="font-mono">{owner}/{REPO_NAME}</span> на твоём github
             </p>
           </div>
 
@@ -747,33 +828,26 @@
     /* ===================== ROOT ===================== */
     function App() {
       const [token, setToken] = useState(null);
-      const [gistId, setGistId] = useState(null);
+      const [owner, setOwner] = useState(null);
       const [ready, setReady] = useState(false);
 
       useEffect(() => {
         const t = localStorage.getItem(LS_TOKEN);
-        const g = localStorage.getItem(LS_GIST);
-        if (t) { setToken(t); if (g) setGistId(g); }
+        const o = localStorage.getItem(LS_OWNER);
+        if (t && o) { setToken(t); setOwner(o); }
         setReady(true);
       }, []);
 
-      // persist gist id
-      useEffect(() => {
-        if (gistId) localStorage.setItem(LS_GIST, gistId);
-      }, [gistId]);
-
       function logout() {
         localStorage.removeItem(LS_TOKEN);
-        localStorage.removeItem(LS_GIST);
-        // owner hash оставляем — чтобы при повторном входе того же пользователя
-        // локальные данные не сбрасывались (их всё равно нет — данные в гисте)
-        setToken(null); setGistId(null);
+        localStorage.removeItem(LS_OWNER);
+        setToken(null); setOwner(null);
         window.location.reload();
       }
 
       if (!ready) return <div className="min-h-full flex items-center justify-center text-slate-500 text-sm">загрузка…</div>;
-      if (!token) return <AuthScreen onReady={t => { setToken(t); setGistId(localStorage.getItem(LS_GIST)); }} />;
-      return <MainApp token={token} gistId={gistId} setGistId={setGistId} onLogout={logout} />;
+      if (!token || !owner) return <AuthScreen onReady={(t, o) => { setToken(t); setOwner(o); }} />;
+      return <MainApp token={token} owner={owner} onLogout={logout} />;
     }
 
     ReactDOM.createRoot(document.getElementById('root')).render(<App />);
