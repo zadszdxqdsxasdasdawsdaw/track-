@@ -17,14 +17,8 @@
       theme: {
         extend: {
           colors: {
-            base: '#0a0a0a',
-            panel: '#141414',
-            border: '#262626',
-            accent: '#eab308',
-            accentMuted: '#854d0e',
-            textMuted: '#a3a3a3',
-            success: '#22c55e',
-            danger: '#ef4444'
+            base: '#0a0a0a', panel: '#141414', border: '#262626',
+            accent: '#eab308', textMuted: '#a3a3a3', success: '#22c55e', danger: '#ef4444'
           },
           fontFamily: {
             sans: ['Inter', 'system-ui', '-apple-system', 'sans-serif'],
@@ -49,9 +43,6 @@
     ::-webkit-scrollbar-track { background: #0a0a0a; }
     ::-webkit-scrollbar-thumb { background: #262626; border-radius: 4px; }
     ::-webkit-scrollbar-thumb:hover { background: #404040; }
-    @keyframes spin { to { transform: rotate(360deg); } }
-    .spin { display: inline-block; animation: spin 1.2s linear infinite; }
-    .glass { background: rgba(20, 20, 20, 0.7); backdrop-filter: blur(12px); }
   </style>
 </head>
 <body>
@@ -149,12 +140,9 @@
     async function ghCreateRepo(token, name) {
       const r = await fetch(`${GH}/user/repos`, {
         method: 'POST', headers: ghHeaders(token),
-        body: JSON.stringify({
-          name, private: true, auto_init: true,
-          description: 'Tracker data (do not rename)'
-        })
+        body: JSON.stringify({ name, private: true, auto_init: true, description: 'Tracker data' })
       });
-      if (!r.ok) throw new Error('Не удалось создать репозиторий. Проверь права токена (scope repo).');
+      if (!r.ok) throw new Error('Ошибка создания репозитория. Проверь scope repo.');
       return r.json();
     }
     async function ghGetFile(token, owner, name, path) {
@@ -185,9 +173,25 @@
       return {
         habits: [], completions: {}, deleted: {},
         weights: {}, weightDeleted: {},
-        kcal: {}, kcalDeleted: {},
+        kcal: {}, kcalDeleted: {}, // Теперь kcal хранится как { [id]: { date, value, desc, ts } }
         settings: { kcalTarget: 2200, updatedAt: 0 }
       };
+    }
+
+    // Миграция старых калорий (где ключом был день) в новый формат (где ключ - UUID приема пищи)
+    function migrateKcal(kObj) {
+      if (!kObj) return {};
+      const out = {};
+      for (const [k, v] of Object.entries(kObj)) {
+        if (/^\d{4}-\d{2}-\d{2}$/.test(k) && v && typeof v === 'object' && 'value' in v && !('date' in v)) {
+          // Старый формат: '2026-11-01': { value, ts }
+          out['legacy_' + k] = { id: 'legacy_' + k, date: k, value: v.value, desc: 'Приём пищи', ts: v.ts };
+        } else if (v && typeof v === 'object' && 'date' in v) {
+          // Новый формат
+          out[k] = v;
+        }
+      }
+      return out;
     }
 
     function mergeTimedMaps(a, b, aDel, bDel) {
@@ -209,14 +213,14 @@
     }
 
     function mergeSettings(a, b) {
-      const A = a || { updatedAt: 0 };
-      const B = b || { updatedAt: 0 };
+      const A = a || { updatedAt: 0 }; const B = b || { updatedAt: 0 };
       const base = { kcalTarget: 2200 };
       return (A.updatedAt || 0) >= (B.updatedAt || 0) ? { ...base, ...B, ...A } : { ...base, ...A, ...B };
     }
 
     function mergeStates(a, b) {
       a = a || {}; b = b || {};
+      
       const habitMap = new Map();
       for (const h of [...(a.habits || []), ...(b.habits || [])]) {
         const prev = habitMap.get(h.id);
@@ -227,6 +231,7 @@
         const h = habitMap.get(id);
         if (h && (h.updatedAt || 0) <= ts) habitMap.delete(id);
       }
+
       const comp = {};
       for (const src of [a.completions || {}, b.completions || {}]) {
         for (const [hid, dates] of Object.entries(src)) {
@@ -242,7 +247,11 @@
       for (const id of Object.keys(comp)) if (!habitMap.has(id)) delete comp[id];
 
       const w = mergeTimedMaps(a.weights, b.weights, a.weightDeleted, b.weightDeleted);
-      const k = mergeTimedMaps(a.kcal, b.kcal, a.kcalDeleted, b.kcalDeleted);
+      
+      // Миграция и мерж калорий
+      const aKcalMigrated = migrateKcal(a.kcal);
+      const bKcalMigrated = migrateKcal(b.kcal);
+      const k = mergeTimedMaps(aKcalMigrated, bKcalMigrated, a.kcalDeleted, b.kcalDeleted);
 
       return {
         habits: [...habitMap.values()],
@@ -373,6 +382,7 @@
     const IconHabits = () => <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 11 12 14 22 4"></polyline><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path></svg>;
     const IconHealth = () => <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"></path></svg>;
     const IconSettings = () => <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>;
+    const IconEdit = () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9"></path><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path></svg>;
 
     /* ===================== COMPONENTS ===================== */
     function SyncBadge({ syncing, lastSync, error, onSync }) {
@@ -401,7 +411,6 @@
     function DonutChart({ data }) {
       const total = data.reduce((a, d) => a + d.value, 0);
       if (total === 0) return <div className="w-32 h-32 rounded-full border-[10px] border-border flex items-center justify-center text-xs text-textMuted">пусто</div>;
-      
       let cur = 0;
       const r = 56, C = 2 * Math.PI * r;
       return (
@@ -410,15 +419,13 @@
             <circle cx="70" cy="70" r={r} fill="none" stroke="#262626" strokeWidth="16" />
             {data.map((d, i) => {
               if (d.value === 0) return null;
-              const frac = d.value / total;
-              const dash = frac * C;
-              const offset = -cur * C;
+              const frac = d.value / total, dash = frac * C, offset = -cur * C;
               cur += frac;
               return <circle key={i} cx="70" cy="70" r={r} fill="none" stroke={d.color} strokeWidth="16" strokeDasharray={`${dash} ${C}`} strokeDashoffset={offset} className="transition-all duration-500" />;
             })}
           </svg>
           <div className="absolute inset-0 flex flex-col items-center justify-center">
-            <div className="text-xl font-bold">{Math.round(data.reduce((a, d) => a + d.value, 0))}</div>
+            <div className="text-xl font-bold">{Math.round(total)}</div>
             <div className="text-[10px] text-textMuted uppercase">всего</div>
           </div>
         </div>
@@ -453,19 +460,18 @@
       const doneToday = activeHabits.filter(h => isDone(state.completions[h.id]?.[today])).length;
       
       const goal = state.settings?.kcalTarget || 2200;
-      const todayKcal = state.kcal[today]?.value || 0;
+      
+      // Суммируем все приемы пищи за сегодня
+      const todayKcal = Object.values(state.kcal).filter(k => k.date === today).reduce((sum, k) => sum + k.value, 0);
       const latestWeight = weightSeriesInRange(state.weights, '2000-01-01', today).pop()?.kg;
 
-      const habitsData = activeHabits.map(h => ({
-        color: '#eab308',
-        value: currentStreak(h.id, state.completions, today)
-      }));
+      const habitsData = activeHabits.map(h => ({ color: '#eab308', value: currentStreak(h.id, state.completions, today) }));
 
       const kcal7 = [];
       for (let i = 6; i >= 0; i--) {
         const d = addDays(today, -i);
-        const val = state.kcal[d]?.value || 0;
-        kcal7.push({ label: d.slice(5), value: val });
+        const daySum = Object.values(state.kcal).filter(k => k.date === d).reduce((sum, k) => sum + k.value, 0);
+        kcal7.push({ label: d.slice(5), value: daySum });
       }
 
       return (
@@ -489,8 +495,7 @@
                       <span className="font-mono text-accent shrink-0">🔥 {currentStreak(h.id, state.completions, today)}</span>
                     </div>
                   ))}
-                  {activeHabits.length > 5 && <div className="text-xs text-textMuted pt-2">и ещё {activeHabits.length - 5}...</div>}
-                  {activeHabits.length === 0 && <div className="text-xs text-textMuted">Добавь привычки, чтобы видеть серии</div>}
+                  {activeHabits.length === 0 && <div className="text-xs text-textMuted">Добавь привычки</div>}
                 </div>
               </div>
             </div>
@@ -514,7 +519,7 @@
                 </thead>
                 <tbody className="divide-y divide-border">
                   {[...Object.entries(state.weights).map(([d, v]) => ({ date: d, type: 'Вес', val: v.kg + ' кг', ts: v.ts, color: 'text-white' })),
-                    ...Object.entries(state.kcal).map(([d, v]) => ({ date: d, type: 'Калории', val: v.value + ' ккал', ts: v.ts, color: 'text-accent' }))]
+                    ...Object.values(state.kcal).map(k => ({ date: k.date, type: k.desc || 'Калории', val: k.value + ' ккал', ts: k.ts, color: 'text-accent' }))]
                     .sort((a, b) => b.ts - a.ts)
                     .slice(0, 5)
                     .map((op, i) => (
@@ -537,7 +542,7 @@
 
     function HabitsTab({ sync, today }) {
       const state = sync.state;
-      const [showNew, setShowNew] = useState(false);
+      const [modal, setModal] = useState(null); // null | 'new' | { id, name }
       const activeHabits = state.habits.filter(h => !h.archived).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 
       function toggleDate(habitId, date) {
@@ -549,18 +554,35 @@
           return { ...prev, completions: c };
         });
       }
-      function addHabit(habit) { sync.setState(prev => ({ ...prev, habits: [...prev.habits, habit] })); setShowNew(false); }
-      function deleteHabit(id) { if(confirm('Удалить?')) sync.setState(prev => ({ ...prev, habits: prev.habits.filter(h => h.id !== id), deleted: { ...prev.deleted, [id]: Date.now() } })); }
+
+      function saveHabit(name, id) {
+        if (id) {
+          sync.setState(prev => ({
+            ...prev,
+            habits: prev.habits.map(h => h.id === id ? { ...h, name, updatedAt: Date.now() } : h)
+          }));
+        } else {
+          sync.setState(prev => ({
+            ...prev,
+            habits: [...prev.habits, { id: crypto.randomUUID(), name, createdAt: isoDate(), updatedAt: Date.now(), archived: false }]
+          }));
+        }
+        setModal(null);
+      }
+
+      function deleteHabit(id) { 
+        if(confirm('Удалить?')) sync.setState(prev => ({ ...prev, habits: prev.habits.filter(h => h.id !== id), deleted: { ...prev.deleted, [id]: Date.now() } })); 
+      }
 
       return (
         <div className="space-y-4 max-w-3xl">
           <div className="flex justify-end mb-2">
-            <button onClick={() => setShowNew(true)} className="bg-accent text-base font-semibold px-4 py-2 rounded-lg text-sm hover:bg-yellow-500 transition">+ Добавить</button>
+            <button onClick={() => setModal('new')} className="bg-accent text-base font-semibold px-4 py-2 rounded-lg text-sm hover:bg-yellow-500 transition">+ Добавить</button>
           </div>
           {activeHabits.map(h => {
             const done = isDone(state.completions[h.id]?.[today]);
             return (
-              <div key={h.id} className="bg-panel border border-border rounded-xl p-4 flex items-center gap-4">
+              <div key={h.id} className="bg-panel border border-border rounded-xl p-4 flex items-center gap-4 group">
                 <button onClick={() => toggleDate(h.id, today)} className={`w-10 h-10 rounded-full border-2 flex items-center justify-center shrink-0 transition ${done ? 'bg-accent border-accent text-base' : 'border-border text-transparent'}`}>
                   ✓
                 </button>
@@ -568,77 +590,163 @@
                   <div className="font-medium">{h.name}</div>
                   <div className="text-xs text-textMuted mt-0.5">🔥 {currentStreak(h.id, state.completions, today)} дней подряд</div>
                 </div>
-                <button onClick={() => deleteHabit(h.id)} className="text-textMuted hover:text-danger px-2 text-sm">✕</button>
+                <button onClick={() => setModal(h)} className="text-textMuted hover:text-accent px-2 text-sm transition"><IconEdit /></button>
+                <button onClick={() => deleteHabit(h.id)} className="text-textMuted hover:text-danger px-2 text-sm transition">✕</button>
               </div>
             );
           })}
-          {showNew && <NewHabitModal onSave={addHabit} onClose={() => setShowNew(false)} />}
+          {modal && <HabitModal initial={modal === 'new' ? null : modal} onSave={saveHabit} onClose={() => setModal(null)} />}
         </div>
       );
     }
 
     function HealthTab({ sync, today }) {
       const state = sync.state;
+      const [subTab, setSubTab] = useState('weight'); // 'weight' | 'kcal'
+      
       const [wDate, setWDate] = useState(today);
       const [wVal, setWVal] = useState('');
+      
       const [kDate, setKDate] = useState(today);
       const [kVal, setKVal] = useState('');
+      const [kDesc, setKDesc] = useState('Приём пищи');
+      const [editKcalId, setEditKcalId] = useState(null);
 
+      // --- WEIGHT LOGIC ---
       const addWeight = () => {
         const v = Number(wVal.replace(',', '.'));
         if (v < 20 || v > 400) return;
-        sync.setState(prev => ({ ...prev, weights: { ...prev.weights, [wDate]: { kg: v, ts: Date.now() } } }));
+        sync.setState(prev => ({ 
+          ...prev, 
+          weights: { ...prev.weights, [wDate]: { kg: v, ts: Date.now() } },
+          weightDeleted: Object.fromEntries(Object.entries(prev.weightDeleted).filter(([d]) => d !== wDate))
+        }));
         setWVal('');
       };
-      const addKcal = () => {
-        const v = Number(kVal);
-        if (v < 500 || v > 15000) return;
-        sync.setState(prev => ({ ...prev, kcal: { ...prev.kcal, [kDate]: { value: v, ts: Date.now() } } }));
-        setKVal('');
+      const editWeight = (d, v) => { setWDate(d); setWVal(String(v)); };
+      const delWeight = (d) => {
+        if(!confirm('Удалить запись?')) return;
+        sync.setState(prev => {
+          const w = { ...prev.weights }; delete w[d];
+          return { ...prev, weights: w, weightDeleted: { ...prev.weightDeleted, [d]: Date.now() } };
+        });
       };
 
+      // --- KCAL LOGIC ---
+      const addKcal = () => {
+        const v = Number(kVal);
+        if (v < 50 || v > 15000) return;
+        
+        if (editKcalId) {
+          sync.setState(prev => ({
+            ...prev,
+            kcal: { ...prev.kcal, [editKcalId]: { id: editKcalId, date: kDate, value: v, desc: kDesc, ts: Date.now() } }
+          }));
+          setEditKcalId(null);
+        } else {
+          const id = crypto.randomUUID();
+          sync.setState(prev => ({
+            ...prev,
+            kcal: { ...prev.kcal, [id]: { id, date: kDate, value: v, desc: kDesc, ts: Date.now() } }
+          }));
+        }
+        setKVal(''); setKDesc('Приём пищи');
+      };
+      const editKcal = (k) => { setKDate(k.date); setKVal(String(k.value)); setKDesc(k.desc || 'Приём пищи'); setEditKcalId(k.id); };
+      const delKcal = (id) => {
+        if(!confirm('Удалить запись?')) return;
+        sync.setState(prev => {
+          const k = { ...prev.kcal }; delete k[id];
+          return { ...prev, kcal: k, kcalDeleted: { ...prev.kcalDeleted, [id]: Date.now() } };
+        });
+      };
+
+      // Группировка калорий по датам для отображения
+      const kcalByDate = Object.values(state.kcal).reduce((acc, k) => {
+        if (!acc[k.date]) acc[k.date] = [];
+        acc[k.date].push(k);
+        return acc;
+      }, {});
+
       return (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          <div className="bg-panel border border-border rounded-2xl p-5">
-            <h3 className="text-[11px] font-medium text-textMuted uppercase tracking-wider mb-4">Дневник веса</h3>
-            <div className="flex gap-2 mb-6">
-              <input type="date" value={wDate} onChange={e=>setWDate(e.target.value)} className="bg-base border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-accent" />
-              <input placeholder="кг" value={wVal} onChange={e=>setWVal(e.target.value)} className="flex-1 bg-base border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-accent w-20" />
-              <button onClick={addWeight} className="bg-accent text-base px-4 rounded-lg font-medium">ОК</button>
-            </div>
-            <div className="space-y-2 max-h-64 overflow-auto pr-2">
-              {Object.entries(state.weights).reverse().map(([d, v]) => (
-                <div key={d} className="flex justify-between items-center text-sm border-b border-border pb-2">
-                  <span className="text-textMuted font-mono">{d}</span>
-                  <span className="font-medium">{v.kg} кг</span>
-                </div>
-              ))}
-            </div>
+        <div className="max-w-3xl space-y-6">
+          {/* Подвкладки */}
+          <div className="flex gap-2 p-1 bg-panel border border-border rounded-xl w-fit">
+            <button onClick={() => setSubTab('weight')} className={`px-6 py-2 rounded-lg text-sm font-medium transition ${subTab === 'weight' ? 'bg-base text-accent' : 'text-textMuted hover:text-white'}`}>⚖ Вес</button>
+            <button onClick={() => setSubTab('kcal')} className={`px-6 py-2 rounded-lg text-sm font-medium transition ${subTab === 'kcal' ? 'bg-base text-accent' : 'text-textMuted hover:text-white'}`}>🔥 Калории</button>
           </div>
 
-          <div className="bg-panel border border-border rounded-2xl p-5">
-            <h3 className="text-[11px] font-medium text-textMuted uppercase tracking-wider mb-4">Дневник калорий</h3>
-            <div className="flex gap-2 mb-6">
-              <input type="date" value={kDate} onChange={e=>setKDate(e.target.value)} className="bg-base border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-accent" />
-              <input placeholder="ккал" value={kVal} onChange={e=>setKVal(e.target.value)} className="flex-1 bg-base border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-accent w-20" />
-              <button onClick={addKcal} className="bg-accent text-base px-4 rounded-lg font-medium">ОК</button>
+          {subTab === 'weight' && (
+            <div className="bg-panel border border-border rounded-2xl p-5 space-y-6">
+              <h3 className="text-[11px] font-medium text-textMuted uppercase tracking-wider">Дневник веса</h3>
+              <div className="flex gap-2">
+                <input type="date" value={wDate} onChange={e=>setWDate(e.target.value)} className="bg-base border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-accent" />
+                <input placeholder="кг" value={wVal} onChange={e=>setWVal(e.target.value)} className="flex-1 bg-base border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-accent" />
+                <button onClick={addWeight} className="bg-accent text-base px-6 rounded-lg font-medium">ОК</button>
+              </div>
+              <div className="space-y-2 max-h-96 overflow-auto pr-2">
+                {Object.entries(state.weights).sort((a,b) => b[0].localeCompare(a[0])).map(([d, v]) => (
+                  <div key={d} className="flex justify-between items-center text-sm border-b border-border pb-2 group">
+                    <span className="text-textMuted font-mono w-24">{d}</span>
+                    <span className="font-medium flex-1">{v.kg} кг</span>
+                    <div className="flex gap-2 opacity-0 group-hover:opacity-100 transition">
+                      <button onClick={() => editWeight(d, v.kg)} className="text-textMuted hover:text-accent"><IconEdit /></button>
+                      <button onClick={() => delWeight(d)} className="text-textMuted hover:text-danger">✕</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
             </div>
-            <div className="space-y-2 max-h-64 overflow-auto pr-2">
-              {Object.entries(state.kcal).reverse().map(([d, v]) => (
-                <div key={d} className="flex justify-between items-center text-sm border-b border-border pb-2">
-                  <span className="text-textMuted font-mono">{d}</span>
-                  <span className="font-medium text-accent">{v.value} ккал</span>
-                </div>
-              ))}
+          )}
+
+          {subTab === 'kcal' && (
+            <div className="bg-panel border border-border rounded-2xl p-5 space-y-6">
+              <h3 className="text-[11px] font-medium text-textMuted uppercase tracking-wider">Дневник калорий</h3>
+              <div className="flex flex-wrap gap-2">
+                <input type="date" value={kDate} onChange={e=>setKDate(e.target.value)} className="bg-base border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-accent" />
+                <select value={kDesc} onChange={e=>setKDesc(e.target.value)} className="bg-base border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-accent">
+                  <option>Завтрак</option><option>Обед</option><option>Ужин</option><option>Перекус</option><option>Приём пищи</option>
+                </select>
+                <input placeholder="ккал" type="number" value={kVal} onChange={e=>setKVal(e.target.value)} className="flex-1 bg-base border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-accent min-w-[80px]" />
+                <button onClick={addKcal} className="bg-accent text-base px-6 rounded-lg font-medium">
+                  {editKcalId ? 'Сохранить' : 'ОК'}
+                </button>
+                {editKcalId && <button onClick={() => { setEditKcalId(null); setKVal(''); setKDesc('Приём пищи'); }} className="text-textMuted hover:text-white px-2">Отмена</button>}
+              </div>
+
+              <div className="space-y-6 max-h-96 overflow-auto pr-2">
+                {Object.entries(kcalByDate).sort((a,b) => b[0].localeCompare(a[0])).map(([date, items]) => {
+                  const total = items.reduce((sum, item) => sum + item.value, 0);
+                  return (
+                    <div key={date} className="bg-base border border-border rounded-xl p-4">
+                      <div className="flex justify-between items-center border-b border-border pb-2 mb-2">
+                        <span className="font-mono text-sm text-textMuted">{date}</span>
+                        <span className="font-bold text-accent">{total} ккал</span>
+                      </div>
+                      <div className="space-y-2">
+                        {items.sort((a,b) => a.ts - b.ts).map(k => (
+                          <div key={k.id} className="flex justify-between items-center text-sm group">
+                            <span className="text-textMuted w-24">{k.desc || 'Приём'}</span>
+                            <span className="flex-1 text-right pr-4">{k.value}</span>
+                            <div className="flex gap-2 opacity-0 group-hover:opacity-100 transition">
+                              <button onClick={() => editKcal(k)} className="text-textMuted hover:text-accent"><IconEdit /></button>
+                              <button onClick={() => delKcal(k.id)} className="text-textMuted hover:text-danger">✕</button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
-          </div>
+          )}
         </div>
       );
     }
 
     function SettingsTab({ sync, token, owner, onLogout }) {
       const [kcalInput, setKcalInput] = useState(String(sync.state.settings?.kcalTarget || 2200));
-
       const saveKcal = () => {
         const v = Number(kcalInput);
         if (!Number.isFinite(v)) return;
@@ -669,16 +777,16 @@
       );
     }
 
-    function NewHabitModal({ onSave, onClose }) {
-      const [name, setName] = useState('');
+    function HabitModal({ initial, onSave, onClose }) {
+      const [name, setName] = useState(initial ? initial.name : '');
       return (
         <div className="fixed inset-0 bg-black/70 flex items-center justify-center p-4 z-50" onClick={onClose}>
           <div onClick={e=>e.stopPropagation()} className="bg-panel border border-border rounded-2xl p-5 w-full max-w-sm space-y-4">
-            <h2 className="font-semibold">Новая привычка</h2>
+            <h2 className="font-semibold">{initial ? 'Редактировать' : 'Новая'} привычка</h2>
             <input value={name} onChange={e=>setName(e.target.value)} autoFocus placeholder="Название" className="w-full bg-base border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-accent" />
             <div className="flex gap-2">
               <button onClick={onClose} className="flex-1 bg-base border border-border rounded-lg py-2 text-sm hover:bg-border/50">Отмена</button>
-              <button onClick={() => { if(name.trim()) onSave({ id: crypto.randomUUID(), name: name.trim(), createdAt: isoDate(), updatedAt: Date.now(), archived: false }); }} className="flex-1 bg-accent text-base font-medium rounded-lg py-2">Создать</button>
+              <button onClick={() => { if(name.trim()) onSave(name.trim(), initial?.id); }} className="flex-1 bg-accent text-base font-medium rounded-lg py-2">Сохранить</button>
             </div>
           </div>
         </div>
@@ -748,9 +856,14 @@
               <h1 className="text-xl font-bold flex items-center gap-2">Трекер <span className="text-accent">●</span></h1>
             </div>
 
+            {/* Время для Германии */}
             <div className="mx-4 mb-6 bg-panel border border-border rounded-xl p-4 text-center">
-              <div className="text-2xl font-mono font-bold tracking-tight mb-1">{time.toLocaleTimeString('ru-RU', {hour12:false})}</div>
-              <div className="text-xs text-textMuted capitalize">{time.toLocaleDateString('ru-RU', { weekday: 'long', day: 'numeric', month: 'long' })}</div>
+              <div className="text-2xl font-mono font-bold tracking-tight mb-1">
+                {time.toLocaleTimeString('ru-RU', {hour12:false, timeZone: 'Europe/Berlin'})}
+              </div>
+              <div className="text-xs text-textMuted capitalize">
+                {time.toLocaleDateString('ru-RU', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'Europe/Berlin' })}
+              </div>
             </div>
 
             <nav className="flex-1 px-3 space-y-1">
