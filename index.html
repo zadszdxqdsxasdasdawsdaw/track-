@@ -98,17 +98,25 @@
     }
 
     /* ===================== ANALYSIS ===================== */
-    function currentStreak(habitId, completions, today = isoDate()) {
-      let day = today;
-      if (!isDone(completions[habitId]?.[day])) day = addDays(day, -1);
-      let n = 0;
-      while (isDone(completions[habitId]?.[day])) { n++; day = addDays(day, -1); }
-      return n;
+    function currentStreak(habit, completions, today = isoDate()) {
+      if (!habit || !completions) return 0;
+      const dates = Object.keys(completions[habit.id] || {}).filter(d => isDone(completions[habit.id][d])).sort();
+      if (dates.length === 0) return 0;
+      const interval = habit.interval || 1;
+      const lastDate = dates[dates.length - 1];
+      if (daysBetween(lastDate, today) > interval) return 0;
+      let streak = 1;
+      for (let i = dates.length - 1; i > 0; i--) {
+        if (daysBetween(dates[i-1], dates[i]) <= interval) streak++;
+        else break;
+      }
+      return streak;
     }
+
     function weightSeriesInRange(weights, fromDate, toDate) {
       return Object.entries(weights || {})
         .filter(([d]) => d >= fromDate && d <= toDate)
-        .map(([d, v]) => ({ date: d, kg: v.kg, ts: v.ts }))
+        .map(([d, v]) => ({ date: d, kg: v.kg }))
         .sort((a, b) => a.date.localeCompare(b.date));
     }
 
@@ -118,23 +126,17 @@
     const FILE_PATH = 'habits.json';
 
     function ghHeaders(token) {
-      return {
-        Authorization: `Bearer ${token}`,
-        Accept: 'application/vnd.github+json',
-        'Content-Type': 'application/json',
-        'X-GitHub-Api-Version': '2022-11-28'
-      };
+      return { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json' };
     }
     async function ghVerify(token) {
       const r = await fetch(`${GH}/user`, { headers: ghHeaders(token) });
       if (r.status === 401) throw new Error('неверный токен или истёк');
-      if (!r.ok) throw new Error(`github /user: ${r.status}`);
+      if (!r.ok) throw new Error(`github ${r.status}`);
       return r.json();
     }
     async function ghGetRepo(token, owner, name) {
       const r = await fetch(`${GH}/repos/${owner}/${name}`, { headers: ghHeaders(token) });
       if (r.status === 404) return null;
-      if (!r.ok) throw new Error(`repo ${r.status}`);
       return r.json();
     }
     async function ghCreateRepo(token, name) {
@@ -142,29 +144,22 @@
         method: 'POST', headers: ghHeaders(token),
         body: JSON.stringify({ name, private: true, auto_init: true, description: 'Tracker data' })
       });
-      if (!r.ok) throw new Error('Ошибка создания репозитория. Проверь scope repo.');
+      if (!r.ok) throw new Error('Ошибка создания. Проверь scope repo.');
       return r.json();
     }
     async function ghGetFile(token, owner, name, path) {
       const r = await fetch(`${GH}/repos/${owner}/${name}/contents/${path}`, { headers: ghHeaders(token) });
       if (r.status === 404) return null;
-      if (!r.ok) throw new Error(`file ${r.status}`);
       const data = await r.json();
-      if (Array.isArray(data)) throw new Error('ожидался файл, пришёл каталог');
       return { content: b64decodeUnicode((data.content || '').replace(/\s/g, '')), sha: data.sha };
     }
     async function ghPutFile(token, owner, name, path, content, sha) {
-      const body = { message: `tracker update ${new Date().toISOString()}`, content: b64encodeUnicode(content) };
+      const body = { message: `update`, content: b64encodeUnicode(content) };
       if (sha) body.sha = sha;
       const r = await fetch(`${GH}/repos/${owner}/${name}/contents/${path}`, {
         method: 'PUT', headers: ghHeaders(token), body: JSON.stringify(body)
       });
-      if (!r.ok) {
-        const err = await r.json().catch(() => ({}));
-        const e = new Error(err?.message || `put ${r.status}`);
-        e.status = r.status;
-        throw e;
-      }
+      if (!r.ok) { const e = new Error(`put ${r.status}`); e.status = r.status; throw e; }
       return r.json();
     }
 
@@ -173,25 +168,9 @@
       return {
         habits: [], completions: {}, deleted: {},
         weights: {}, weightDeleted: {},
-        kcal: {}, kcalDeleted: {}, // Теперь kcal хранится как { [id]: { date, value, desc, ts } }
+        kcal: {}, kcalDeleted: {},
         settings: { kcalTarget: 2200, updatedAt: 0 }
       };
-    }
-
-    // Миграция старых калорий (где ключом был день) в новый формат (где ключ - UUID приема пищи)
-    function migrateKcal(kObj) {
-      if (!kObj) return {};
-      const out = {};
-      for (const [k, v] of Object.entries(kObj)) {
-        if (/^\d{4}-\d{2}-\d{2}$/.test(k) && v && typeof v === 'object' && 'value' in v && !('date' in v)) {
-          // Старый формат: '2026-11-01': { value, ts }
-          out['legacy_' + k] = { id: 'legacy_' + k, date: k, value: v.value, desc: 'Приём пищи', ts: v.ts };
-        } else if (v && typeof v === 'object' && 'date' in v) {
-          // Новый формат
-          out[k] = v;
-        }
-      }
-      return out;
     }
 
     function mergeTimedMaps(a, b, aDel, bDel) {
@@ -212,15 +191,8 @@
       return { data: out, deleted };
     }
 
-    function mergeSettings(a, b) {
-      const A = a || { updatedAt: 0 }; const B = b || { updatedAt: 0 };
-      const base = { kcalTarget: 2200 };
-      return (A.updatedAt || 0) >= (B.updatedAt || 0) ? { ...base, ...B, ...A } : { ...base, ...A, ...B };
-    }
-
     function mergeStates(a, b) {
       a = a || {}; b = b || {};
-      
       const habitMap = new Map();
       for (const h of [...(a.habits || []), ...(b.habits || [])]) {
         const prev = habitMap.get(h.id);
@@ -231,7 +203,6 @@
         const h = habitMap.get(id);
         if (h && (h.updatedAt || 0) <= ts) habitMap.delete(id);
       }
-
       const comp = {};
       for (const src of [a.completions || {}, b.completions || {}]) {
         for (const [hid, dates] of Object.entries(src)) {
@@ -247,19 +218,12 @@
       for (const id of Object.keys(comp)) if (!habitMap.has(id)) delete comp[id];
 
       const w = mergeTimedMaps(a.weights, b.weights, a.weightDeleted, b.weightDeleted);
-      
-      // Миграция и мерж калорий
-      const aKcalMigrated = migrateKcal(a.kcal);
-      const bKcalMigrated = migrateKcal(b.kcal);
-      const k = mergeTimedMaps(aKcalMigrated, bKcalMigrated, a.kcalDeleted, b.kcalDeleted);
+      const k = mergeTimedMaps(a.kcal, b.kcal, a.kcalDeleted, b.kcalDeleted);
 
       return {
-        habits: [...habitMap.values()],
-        completions: comp,
-        deleted,
-        weights: w.data, weightDeleted: w.deleted,
-        kcal: k.data, kcalDeleted: k.deleted,
-        settings: mergeSettings(a.settings, b.settings)
+        habits: [...habitMap.values()], completions: comp, deleted,
+        weights: w.data, weightDeleted: w.deleted, kcal: k.data, kcalDeleted: k.deleted,
+        settings: { ...(a.settings || {}), ...(b.settings || {}), updatedAt: Math.max(a.settings?.updatedAt||0, b.settings?.updatedAt||0) }
       };
     }
 
@@ -283,20 +247,14 @@
           try {
             let repo = await ghGetRepo(token, owner, REPO_NAME);
             if (!repo) repo = await ghCreateRepo(token, REPO_NAME);
-            if (!repo.private) throw new Error(`репозиторий ${owner}/${REPO_NAME} публичный — сделай его приватным`);
+            if (!repo.private) throw new Error(`репозиторий публичный — сделай приватным`);
 
             const file = await ghGetFile(token, owner, REPO_NAME, FILE_PATH);
             let merged = stateRef.current;
-            if (file) {
-              merged = mergeStates(stateRef.current, JSON.parse(file.content));
-              lastShaRef.current = file.sha;
-            }
+            if (file) { merged = mergeStates(stateRef.current, JSON.parse(file.content)); lastShaRef.current = file.sha; }
             if (alive) { setState(merged); setLastSync(Date.now()); initialised.current = true; }
-            if (!file) {
-              const res = await ghPutFile(token, owner, REPO_NAME, FILE_PATH, JSON.stringify(merged), null);
-              lastShaRef.current = res?.content?.sha ?? null;
-            } else if (JSON.stringify(merged) !== file.content) {
-              const res = await ghPutFile(token, owner, REPO_NAME, FILE_PATH, JSON.stringify(merged), file.sha);
+            if (!file || JSON.stringify(merged) !== file.content) {
+              const res = await ghPutFile(token, owner, REPO_NAME, FILE_PATH, JSON.stringify(merged), file?.sha);
               lastShaRef.current = res?.content?.sha ?? null;
               if (alive) setLastSync(Date.now());
             }
@@ -316,15 +274,12 @@
             for (let attempt = 0; attempt < 2; attempt++) {
               const cur = await ghGetFile(token, owner, REPO_NAME, FILE_PATH);
               let toWrite = local;
-              if (cur && cur.sha !== lastShaRef.current) {
-                toWrite = mergeStates(local, JSON.parse(cur.content));
-              }
+              if (cur && cur.sha !== lastShaRef.current) toWrite = mergeStates(local, JSON.parse(cur.content));
               try {
                 const res = await ghPutFile(token, owner, REPO_NAME, FILE_PATH, JSON.stringify(toWrite), cur?.sha ?? null);
                 lastShaRef.current = res?.content?.sha ?? null;
                 if (JSON.stringify(toWrite) !== JSON.stringify(local)) setState(toWrite);
-                setLastSync(Date.now()); setError(null);
-                break;
+                setLastSync(Date.now()); setError(null); break;
               } catch (e) {
                 if (attempt === 0 && (e.status === 409 || e.status === 422)) continue;
                 throw e;
@@ -356,24 +311,9 @@
         return () => { alive = false; clearInterval(iv); document.removeEventListener('visibilitychange', onVis); };
       }, [token, owner]);
 
-      async function forceSync() {
-        if (!token || !owner) return;
-        setSyncing(true);
-        try {
-          const cur = await ghGetFile(token, owner, REPO_NAME, FILE_PATH);
-          let merged = stateRef.current, sha = null;
-          if (cur) { merged = mergeStates(stateRef.current, JSON.parse(cur.content)); sha = cur.sha; }
-          const res = await ghPutFile(token, owner, REPO_NAME, FILE_PATH, JSON.stringify(merged), sha);
-          lastShaRef.current = res?.content?.sha ?? null;
-          setState(merged); setLastSync(Date.now()); setError(null);
-        } catch (e) { setError(e.message); }
-        finally { setSyncing(false); }
-      }
-
-      return { state, setState, loading, syncing, lastSync, error, forceSync };
+      return { state, setState, loading, syncing, lastSync, error, forceSync: poll };
     }
 
-    /* ===================== LOCAL STORAGE ===================== */
     const LS_TOKEN = 'habits_gh_token_v1';
     const LS_OWNER = 'habits_gh_owner_v1';
 
@@ -408,26 +348,15 @@
       );
     }
 
-    function DonutChart({ data }) {
-      const total = data.reduce((a, d) => a + d.value, 0);
-      if (total === 0) return <div className="w-32 h-32 rounded-full border-[10px] border-border flex items-center justify-center text-xs text-textMuted">пусто</div>;
-      let cur = 0;
-      const r = 56, C = 2 * Math.PI * r;
+    function PeriodSelector({ period, setPeriod, options = [7, 14, 30] }) {
       return (
-        <div className="relative w-36 h-36">
-          <svg viewBox="0 0 140 140" className="w-full h-full -rotate-90">
-            <circle cx="70" cy="70" r={r} fill="none" stroke="#262626" strokeWidth="16" />
-            {data.map((d, i) => {
-              if (d.value === 0) return null;
-              const frac = d.value / total, dash = frac * C, offset = -cur * C;
-              cur += frac;
-              return <circle key={i} cx="70" cy="70" r={r} fill="none" stroke={d.color} strokeWidth="16" strokeDasharray={`${dash} ${C}`} strokeDashoffset={offset} className="transition-all duration-500" />;
-            })}
-          </svg>
-          <div className="absolute inset-0 flex flex-col items-center justify-center">
-            <div className="text-xl font-bold">{Math.round(total)}</div>
-            <div className="text-[10px] text-textMuted uppercase">всего</div>
-          </div>
+        <div className="flex bg-base border border-border rounded-lg overflow-hidden text-[11px]">
+          {options.map(o => (
+            <button key={o} onClick={() => setPeriod(o)}
+              className={`px-3 py-1 transition ${period === o ? 'bg-accent/20 text-accent font-medium' : 'text-textMuted hover:text-white'}`}>
+              {o}д
+            </button>
+          ))}
         </div>
       );
     }
@@ -436,15 +365,14 @@
       if (!data.length) return <div className="text-xs text-textMuted py-10 text-center">нет данных</div>;
       const max = Math.max(target || 0, ...data.map(d => d.value)) * 1.1;
       return (
-        <div className="flex items-end gap-2 h-32 w-full">
+        <div className="flex items-end gap-1.5 h-32 w-full mt-4">
           {data.map((d, i) => {
             const h = (d.value / max) * 100;
-            const over = d.value > target;
             return (
               <div key={i} className="flex-1 flex flex-col items-center justify-end h-full gap-1 group relative">
-                <div className="opacity-0 group-hover:opacity-100 absolute -top-6 text-[10px] bg-border px-1.5 py-0.5 rounded text-white pointer-events-none transition">{d.value}</div>
-                <div className="w-full max-w-[24px] rounded-t-sm transition-all duration-500" style={{ height: `${h}%`, background: over ? '#ef4444' : '#eab308' }} />
-                <div className="text-[9px] text-textMuted">{d.label}</div>
+                <div className="opacity-0 group-hover:opacity-100 absolute -top-6 text-[10px] bg-border px-1.5 py-0.5 rounded text-white z-10 pointer-events-none transition">{d.value}</div>
+                <div className="w-full max-w-[20px] rounded-t-sm transition-all duration-500" style={{ height: `${h}%`, background: d.value > target ? '#ef4444' : '#eab308' }} />
+                <div className="text-[9px] text-textMuted truncate w-full text-center">{d.label}</div>
               </div>
             );
           })}
@@ -452,30 +380,77 @@
       );
     }
 
+    function WeightLineChart({ data }) {
+      if (data.length < 2) return <div className="text-xs text-textMuted py-10 text-center">Внеси ≥2 взвешивания за период</div>;
+      const W = 300, H = 120, PL = 30, PR = 10, PT = 10, PB = 20;
+      const pw = W - PL - PR, ph = H - PT - PB;
+      const minY = Math.min(...data.map(d=>d.kg)) - 1, maxY = Math.max(...data.map(d=>d.kg)) + 1;
+      const range = maxY - minY;
+      const x = i => PL + (i / (data.length - 1)) * pw;
+      const y = kg => PT + (1 - (kg - minY) / range) * ph;
+      const path = data.map((d, i) => `${i ? 'L' : 'M'} ${x(i).toFixed(1)} ${y(d.kg).toFixed(1)}`).join(' ');
+      
+      return (
+        <svg viewBox={`0 0 ${W} ${H}`} className="w-full mt-4">
+          {[minY, minY + range/2, maxY].map((v, i) => (
+            <g key={i}>
+              <line x1={PL} x2={W - PR} y1={y(v)} y2={y(v)} stroke="#262626" strokeDasharray="2 2" />
+              <text x={PL - 4} y={y(v) + 3} textAnchor="end" fontSize="9" fill="#a3a3a3">{v.toFixed(1)}</text>
+            </g>
+          ))}
+          <path d={path} fill="none" stroke="#eab308" strokeWidth="2.5" />
+          {data.map((d, i) => (
+            <circle key={i} cx={x(i)} cy={y(d.kg)} r="3" fill="#141414" stroke="#eab308" strokeWidth="2" />
+          ))}
+          <text x={PL} y={H - 4} fontSize="9" fill="#a3a3a3">{data[0].date.slice(5)}</text>
+          <text x={W - PR} y={H - 4} textAnchor="end" fontSize="9" fill="#a3a3a3">{data[data.length - 1].date.slice(5)}</text>
+        </svg>
+      );
+    }
+
     /* ===================== VIEWS ===================== */
 
     function DashboardTab({ sync, today }) {
       const state = sync.state;
+      const [kcalPeriod, setKcalPeriod] = useState(7);
+      const [weightPeriod, setWeightPeriod] = useState(30);
+      const [weightInput, setWeightInput] = useState('');
+
       const activeHabits = state.habits.filter(h => !h.archived);
       const doneToday = activeHabits.filter(h => isDone(state.completions[h.id]?.[today])).length;
       
       const goal = state.settings?.kcalTarget || 2200;
-      
-      // Суммируем все приемы пищи за сегодня
       const todayKcal = Object.values(state.kcal).filter(k => k.date === today).reduce((sum, k) => sum + k.value, 0);
       const latestWeight = weightSeriesInRange(state.weights, '2000-01-01', today).pop()?.kg;
 
-      const habitsData = activeHabits.map(h => ({ color: '#eab308', value: currentStreak(h.id, state.completions, today) }));
-
-      const kcal7 = [];
-      for (let i = 6; i >= 0; i--) {
+      // Kcal data
+      const kcalData = [];
+      for (let i = kcalPeriod - 1; i >= 0; i--) {
         const d = addDays(today, -i);
-        const daySum = Object.values(state.kcal).filter(k => k.date === d).reduce((sum, k) => sum + k.value, 0);
-        kcal7.push({ label: d.slice(5), value: daySum });
+        const sum = Object.values(state.kcal).filter(k => k.date === d).reduce((s, k) => s + k.value, 0);
+        kcalData.push({ label: d.slice(5), value: sum });
       }
+      // Weight data
+      const weightData = weightSeriesInRange(state.weights, addDays(today, -weightPeriod), today);
+
+      const toggleHabit = (id) => {
+        sync.setState(prev => {
+          const c = { ...prev.completions };
+          c[id] = { ...(c[id] || {}) };
+          c[id][today] = { on: !isDone(c[id][today]), ts: Date.now() };
+          return { ...prev, completions: c };
+        });
+      };
+
+      const addWeight = () => {
+        const v = Number(weightInput.replace(',', '.'));
+        if (v < 20 || v > 400) return;
+        sync.setState(prev => ({ ...prev, weights: { ...prev.weights, [today]: { kg: v, ts: Date.now() } } }));
+        setWeightInput('');
+      };
 
       return (
-        <div className="space-y-6">
+        <div className="space-y-6 max-w-4xl">
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
             <Stat label="Привычки сегодня" value={`${doneToday} / ${activeHabits.length}`} sub="выполнено" trend={doneToday === activeHabits.length && activeHabits.length > 0 ? "Всё готово!" : ""} />
             <Stat label="Калории сегодня" value={todayKcal} sub="ккал" trend={todayKcal > goal ? `+${todayKcal - goal} к цели` : goal - todayKcal > 0 ? `осталось ${goal - todayKcal}` : ""} />
@@ -483,29 +458,51 @@
             <Stat label="Цель калорий" value={goal} sub="ккал/день" />
           </div>
 
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            <div className="bg-panel border border-border rounded-2xl p-5">
-              <h3 className="text-[11px] font-medium text-textMuted uppercase tracking-wider mb-6">Серии привычек</h3>
-              <div className="flex items-center gap-8">
-                <DonutChart data={habitsData} />
-                <div className="flex-1 space-y-3">
-                  {activeHabits.slice(0, 5).map(h => (
-                    <div key={h.id} className="flex items-center justify-between text-xs">
-                      <span className="truncate pr-2">{h.name}</span>
-                      <span className="font-mono text-accent shrink-0">🔥 {currentStreak(h.id, state.completions, today)}</span>
+          {/* 1. Привычки */}
+          <div className="bg-panel border border-border rounded-2xl p-5">
+            <h3 className="text-[11px] font-medium text-textMuted uppercase tracking-wider mb-4">Привычки на сегодня</h3>
+            <div className="space-y-3">
+              {activeHabits.length === 0 && <div className="text-sm text-textMuted">Нет привычек</div>}
+              {activeHabits.map(h => {
+                const done = isDone(state.completions[h.id]?.[today]);
+                return (
+                  <div key={h.id} className="flex items-center gap-4">
+                    <button onClick={() => toggleHabit(h.id)} className={`w-8 h-8 rounded-full border-2 flex items-center justify-center shrink-0 transition ${done ? 'bg-accent border-accent text-base' : 'border-border text-transparent hover:border-accent/50'}`}>
+                      ✓
+                    </button>
+                    <div className="flex-1 min-w-0">
+                      <div className="font-medium text-sm">{h.name}</div>
                     </div>
-                  ))}
-                  {activeHabits.length === 0 && <div className="text-xs text-textMuted">Добавь привычки</div>}
-                </div>
-              </div>
-            </div>
-
-            <div className="bg-panel border border-border rounded-2xl p-5">
-              <h3 className="text-[11px] font-medium text-textMuted uppercase tracking-wider mb-6">Калории (7 дней)</h3>
-              <BarChart data={kcal7} target={goal} />
+                    <div className="text-xs text-accent font-mono shrink-0">🔥 {currentStreak(h, state.completions, today)}</div>
+                  </div>
+                );
+              })}
             </div>
           </div>
 
+          {/* 2. Калории */}
+          <div className="bg-panel border border-border rounded-2xl p-5">
+            <div className="flex justify-between items-center mb-2">
+              <h3 className="text-[11px] font-medium text-textMuted uppercase tracking-wider">Калории</h3>
+              <PeriodSelector period={kcalPeriod} setPeriod={setKcalPeriod} />
+            </div>
+            <BarChart data={kcalData} target={goal} />
+          </div>
+
+          {/* 3. Вес */}
+          <div className="bg-panel border border-border rounded-2xl p-5">
+            <div className="flex justify-between items-center mb-2">
+              <h3 className="text-[11px] font-medium text-textMuted uppercase tracking-wider">График веса</h3>
+              <PeriodSelector period={weightPeriod} setPeriod={setWeightPeriod} />
+            </div>
+            <WeightLineChart data={weightData} />
+            <div className="flex gap-2 mt-4">
+              <input placeholder="Добавить вес на сегодня..." value={weightInput} onChange={e=>setWeightInput(e.target.value)} type="number" className="flex-1 bg-base border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-accent" />
+              <button onClick={addWeight} className="bg-accent text-base px-4 rounded-lg font-medium text-sm">ОК</button>
+            </div>
+          </div>
+
+          {/* 4. Последние операции */}
           <div className="bg-panel border border-border rounded-2xl p-5">
             <h3 className="text-[11px] font-medium text-textMuted uppercase tracking-wider mb-4">Последние операции</h3>
             <div className="overflow-x-auto">
@@ -520,8 +517,7 @@
                 <tbody className="divide-y divide-border">
                   {[...Object.entries(state.weights).map(([d, v]) => ({ date: d, type: 'Вес', val: v.kg + ' кг', ts: v.ts, color: 'text-white' })),
                     ...Object.values(state.kcal).map(k => ({ date: k.date, type: k.desc || 'Калории', val: k.value + ' ккал', ts: k.ts, color: 'text-accent' }))]
-                    .sort((a, b) => b.ts - a.ts)
-                    .slice(0, 5)
+                    .sort((a, b) => b.ts - a.ts).slice(0, 5)
                     .map((op, i) => (
                       <tr key={i}>
                         <td className="py-3 text-textMuted font-mono text-xs">{op.date}</td>
@@ -530,7 +526,7 @@
                       </tr>
                     ))}
                   {Object.keys(state.weights).length === 0 && Object.keys(state.kcal).length === 0 && (
-                    <tr><td colSpan="3" className="py-6 text-center text-textMuted text-xs">Нет записей. Добавь данные.</td></tr>
+                    <tr><td colSpan="3" className="py-6 text-center text-textMuted text-xs">Нет записей.</td></tr>
                   )}
                 </tbody>
               </table>
@@ -540,61 +536,150 @@
       );
     }
 
+    function MonthCalendar({ habit, state, today, onToggle }) {
+      const [currentDate, setCurrentDate] = useState(new Date(today));
+      const y = currentDate.getFullYear();
+      const m = currentDate.getMonth();
+      
+      const firstDay = new Date(y, m, 1);
+      const startOffset = (firstDay.getDay() + 6) % 7; // Mon = 0
+      const daysInMonth = new Date(y, m + 1, 0).getDate();
+      
+      const prevMonth = () => setCurrentDate(new Date(y, m - 1, 1));
+      const nextMonth = () => setCurrentDate(new Date(y, m + 1, 1));
+
+      const monthNames = ["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь", "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"];
+      const days = [];
+
+      for (let i = 0; i < startOffset; i++) days.push(null);
+      for (let i = 1; i <= daysInMonth; i++) {
+        const dStr = isoDate(new Date(y, m, i));
+        days.push({ date: dStr, day: i });
+      }
+
+      return (
+        <div className="bg-base border border-border rounded-xl p-4 mt-4">
+          <div className="flex justify-between items-center mb-4">
+            <button onClick={prevMonth} className="px-3 py-1 text-textMuted hover:text-white">◀</button>
+            <div className="font-semibold">{monthNames[m]} {y}</div>
+            <button onClick={nextMonth} className="px-3 py-1 text-textMuted hover:text-white">▶</button>
+          </div>
+          <div className="grid grid-cols-7 gap-1 text-center mb-2 text-[10px] text-textMuted">
+            <div>Пн</div><div>Вт</div><div>Ср</div><div>Чт</div><div>Пт</div><div>Сб</div><div>Вс</div>
+          </div>
+          <div className="grid grid-cols-7 gap-1">
+            {days.map((d, i) => {
+              if (!d) return <div key={`empty-${i}`} />;
+              const done = isDone(state.completions[habit.id]?.[d.date]);
+              const isToday = d.date === today;
+              return (
+                <button key={d.date} onClick={() => onToggle(habit.id, d.date)}
+                  className={`aspect-square flex items-center justify-center rounded-lg text-sm transition
+                    ${done ? 'bg-accent text-base font-bold' : 'bg-panel text-textMuted hover:bg-border'}
+                    ${isToday ? 'ring-2 ring-accent/50 ring-offset-2 ring-offset-base' : ''}`}>
+                  {d.day}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      );
+    }
+
     function HabitsTab({ sync, today }) {
       const state = sync.state;
-      const [modal, setModal] = useState(null); // null | 'new' | { id, name }
+      const [modal, setModal] = useState(null);
+      const [view, setView] = useState('list'); // 'list' | 'calendar'
+      const [selectedHabitId, setSelectedHabitId] = useState(null);
+
       const activeHabits = state.habits.filter(h => !h.archived).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+      
+      // Если календарь и не выбрана привычка, выбираем первую
+      if (view === 'calendar' && !selectedHabitId && activeHabits.length > 0) {
+        setSelectedHabitId(activeHabits[0].id);
+      }
 
       function toggleDate(habitId, date) {
         sync.setState(prev => {
-          const now = Date.now();
           const c = { ...prev.completions };
           c[habitId] = { ...(c[habitId] || {}) };
-          c[habitId][date] = { on: !isDone(c[habitId][date]), ts: now };
+          c[habitId][date] = { on: !isDone(c[habitId][date]), ts: Date.now() };
           return { ...prev, completions: c };
         });
       }
 
-      function saveHabit(name, id) {
+      function saveHabit(name, interval, id) {
         if (id) {
           sync.setState(prev => ({
-            ...prev,
-            habits: prev.habits.map(h => h.id === id ? { ...h, name, updatedAt: Date.now() } : h)
+            ...prev, habits: prev.habits.map(h => h.id === id ? { ...h, name, interval, updatedAt: Date.now() } : h)
           }));
         } else {
           sync.setState(prev => ({
-            ...prev,
-            habits: [...prev.habits, { id: crypto.randomUUID(), name, createdAt: isoDate(), updatedAt: Date.now(), archived: false }]
+            ...prev, habits: [...prev.habits, { id: crypto.randomUUID(), name, interval, createdAt: isoDate(), updatedAt: Date.now(), archived: false }]
           }));
         }
         setModal(null);
       }
 
-      function deleteHabit(id) { 
-        if(confirm('Удалить?')) sync.setState(prev => ({ ...prev, habits: prev.habits.filter(h => h.id !== id), deleted: { ...prev.deleted, [id]: Date.now() } })); 
-      }
+      const selectedHabit = activeHabits.find(h => h.id === selectedHabitId) || activeHabits[0];
 
       return (
         <div className="space-y-4 max-w-3xl">
-          <div className="flex justify-end mb-2">
+          <div className="flex justify-between items-center mb-2">
+            <div className="flex bg-panel border border-border rounded-lg p-1">
+              <button onClick={() => setView('list')} className={`px-4 py-1.5 text-xs rounded transition ${view==='list'?'bg-base text-accent font-medium':'text-textMuted hover:text-white'}`}>Список</button>
+              <button onClick={() => setView('calendar')} className={`px-4 py-1.5 text-xs rounded transition ${view==='calendar'?'bg-base text-accent font-medium':'text-textMuted hover:text-white'}`}>Календарь</button>
+            </div>
             <button onClick={() => setModal('new')} className="bg-accent text-base font-semibold px-4 py-2 rounded-lg text-sm hover:bg-yellow-500 transition">+ Добавить</button>
           </div>
-          {activeHabits.map(h => {
-            const done = isDone(state.completions[h.id]?.[today]);
-            return (
-              <div key={h.id} className="bg-panel border border-border rounded-xl p-4 flex items-center gap-4 group">
-                <button onClick={() => toggleDate(h.id, today)} className={`w-10 h-10 rounded-full border-2 flex items-center justify-center shrink-0 transition ${done ? 'bg-accent border-accent text-base' : 'border-border text-transparent'}`}>
-                  ✓
-                </button>
-                <div className="flex-1 min-w-0">
-                  <div className="font-medium">{h.name}</div>
-                  <div className="text-xs text-textMuted mt-0.5">🔥 {currentStreak(h.id, state.completions, today)} дней подряд</div>
-                </div>
-                <button onClick={() => setModal(h)} className="text-textMuted hover:text-accent px-2 text-sm transition"><IconEdit /></button>
-                <button onClick={() => deleteHabit(h.id)} className="text-textMuted hover:text-danger px-2 text-sm transition">✕</button>
-              </div>
-            );
-          })}
+
+          {view === 'list' && (
+            <div className="space-y-3">
+              {activeHabits.map(h => {
+                const done = isDone(state.completions[h.id]?.[today]);
+                const streak = currentStreak(h, state.completions, today);
+                const interval = h.interval || 1;
+                
+                return (
+                  <div key={h.id} className="bg-panel border border-border rounded-xl p-4 flex items-center gap-4 group">
+                    <button onClick={() => toggleDate(h.id, today)} className={`w-10 h-10 rounded-full border-2 flex items-center justify-center shrink-0 transition ${done ? 'bg-accent border-accent text-base' : 'border-border text-transparent'}`}>
+                      ✓
+                    </button>
+                    <div className="flex-1 min-w-0">
+                      <div className="font-medium">{h.name}</div>
+                      <div className="text-xs text-textMuted mt-0.5">
+                        {interval === 1 ? (
+                          <>🔥 {streak} {plural(streak, 'день', 'дня', 'дней')} подряд</>
+                        ) : (
+                          <>🔥 {streak} {plural(streak, 'раз', 'раза', 'раз')} · <span className="text-accent/80">раз в {interval} {plural(interval, 'день', 'дня', 'дней')}</span></>
+                        )}
+                      </div>
+                    </div>
+                    <button onClick={() => setModal(h)} className="text-textMuted hover:text-accent px-2 text-sm transition"><IconEdit /></button>
+                    <button onClick={() => { if(confirm('Удалить?')) sync.setState(prev => ({ ...prev, habits: prev.habits.filter(x => x.id !== h.id), deleted: { ...prev.deleted, [h.id]: Date.now() } })); }} className="text-textMuted hover:text-danger px-2 text-sm transition">✕</button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {view === 'calendar' && activeHabits.length > 0 && (
+            <div className="bg-panel border border-border rounded-xl p-4">
+              <select 
+                value={selectedHabitId || ''} 
+                onChange={e => setSelectedHabitId(e.target.value)}
+                className="w-full bg-base border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-accent"
+              >
+                {activeHabits.map(h => <option key={h.id} value={h.id}>{h.name}</option>)}
+              </select>
+              {selectedHabit && <MonthCalendar habit={selectedHabit} state={state} today={today} onToggle={toggleDate} />}
+            </div>
+          )}
+          
+          {view === 'calendar' && activeHabits.length === 0 && (
+            <div className="text-center py-10 text-textMuted text-sm bg-panel border border-border rounded-xl">Нет привычек для отображения</div>
+          )}
+
           {modal && <HabitModal initial={modal === 'new' ? null : modal} onSave={saveHabit} onClose={() => setModal(null)} />}
         </div>
       );
@@ -602,7 +687,7 @@
 
     function HealthTab({ sync, today }) {
       const state = sync.state;
-      const [subTab, setSubTab] = useState('weight'); // 'weight' | 'kcal'
+      const [subTab, setSubTab] = useState('weight');
       
       const [wDate, setWDate] = useState(today);
       const [wVal, setWVal] = useState('');
@@ -612,13 +697,12 @@
       const [kDesc, setKDesc] = useState('Приём пищи');
       const [editKcalId, setEditKcalId] = useState(null);
 
-      // --- WEIGHT LOGIC ---
+      // WEIGHT
       const addWeight = () => {
         const v = Number(wVal.replace(',', '.'));
         if (v < 20 || v > 400) return;
         sync.setState(prev => ({ 
-          ...prev, 
-          weights: { ...prev.weights, [wDate]: { kg: v, ts: Date.now() } },
+          ...prev, weights: { ...prev.weights, [wDate]: { kg: v, ts: Date.now() } },
           weightDeleted: Object.fromEntries(Object.entries(prev.weightDeleted).filter(([d]) => d !== wDate))
         }));
         setWVal('');
@@ -632,23 +716,16 @@
         });
       };
 
-      // --- KCAL LOGIC ---
+      // KCAL
       const addKcal = () => {
         const v = Number(kVal);
         if (v < 50 || v > 15000) return;
-        
         if (editKcalId) {
-          sync.setState(prev => ({
-            ...prev,
-            kcal: { ...prev.kcal, [editKcalId]: { id: editKcalId, date: kDate, value: v, desc: kDesc, ts: Date.now() } }
-          }));
+          sync.setState(prev => ({ ...prev, kcal: { ...prev.kcal, [editKcalId]: { id: editKcalId, date: kDate, value: v, desc: kDesc, ts: Date.now() } } }));
           setEditKcalId(null);
         } else {
           const id = crypto.randomUUID();
-          sync.setState(prev => ({
-            ...prev,
-            kcal: { ...prev.kcal, [id]: { id, date: kDate, value: v, desc: kDesc, ts: Date.now() } }
-          }));
+          sync.setState(prev => ({ ...prev, kcal: { ...prev.kcal, [id]: { id, date: kDate, value: v, desc: kDesc, ts: Date.now() } } }));
         }
         setKVal(''); setKDesc('Приём пищи');
       };
@@ -661,16 +738,12 @@
         });
       };
 
-      // Группировка калорий по датам для отображения
       const kcalByDate = Object.values(state.kcal).reduce((acc, k) => {
-        if (!acc[k.date]) acc[k.date] = [];
-        acc[k.date].push(k);
-        return acc;
+        if (!acc[k.date]) acc[k.date] = []; acc[k.date].push(k); return acc;
       }, {});
 
       return (
         <div className="max-w-3xl space-y-6">
-          {/* Подвкладки */}
           <div className="flex gap-2 p-1 bg-panel border border-border rounded-xl w-fit">
             <button onClick={() => setSubTab('weight')} className={`px-6 py-2 rounded-lg text-sm font-medium transition ${subTab === 'weight' ? 'bg-base text-accent' : 'text-textMuted hover:text-white'}`}>⚖ Вес</button>
             <button onClick={() => setSubTab('kcal')} className={`px-6 py-2 rounded-lg text-sm font-medium transition ${subTab === 'kcal' ? 'bg-base text-accent' : 'text-textMuted hover:text-white'}`}>🔥 Калории</button>
@@ -779,14 +852,30 @@
 
     function HabitModal({ initial, onSave, onClose }) {
       const [name, setName] = useState(initial ? initial.name : '');
+      const [interval, setInterval] = useState(initial?.interval || 1);
       return (
         <div className="fixed inset-0 bg-black/70 flex items-center justify-center p-4 z-50" onClick={onClose}>
           <div onClick={e=>e.stopPropagation()} className="bg-panel border border-border rounded-2xl p-5 w-full max-w-sm space-y-4">
             <h2 className="font-semibold">{initial ? 'Редактировать' : 'Новая'} привычка</h2>
-            <input value={name} onChange={e=>setName(e.target.value)} autoFocus placeholder="Название" className="w-full bg-base border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-accent" />
-            <div className="flex gap-2">
+            <div>
+              <label className="block text-xs text-textMuted mb-1">Название</label>
+              <input value={name} onChange={e=>setName(e.target.value)} autoFocus placeholder="Название" className="w-full bg-base border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-accent" />
+            </div>
+            <div>
+              <label className="block text-xs text-textMuted mb-1">Частота выполнения</label>
+              <select value={interval} onChange={e=>setInterval(Number(e.target.value))} className="w-full bg-base border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-accent">
+                <option value={1}>Каждый день</option>
+                <option value={2}>Раз в 2 дня</option>
+                <option value={3}>Раз в 3 дня</option>
+                <option value={4}>Раз в 4 дня</option>
+                <option value={5}>Раз в 5 дней</option>
+                <option value={6}>Раз в 6 дней</option>
+                <option value={7}>Раз в неделю</option>
+              </select>
+            </div>
+            <div className="flex gap-2 pt-2">
               <button onClick={onClose} className="flex-1 bg-base border border-border rounded-lg py-2 text-sm hover:bg-border/50">Отмена</button>
-              <button onClick={() => { if(name.trim()) onSave(name.trim(), initial?.id); }} className="flex-1 bg-accent text-base font-medium rounded-lg py-2">Сохранить</button>
+              <button onClick={() => { if(name.trim()) onSave(name.trim(), interval, initial?.id); }} className="flex-1 bg-accent text-base font-medium rounded-lg py-2">Сохранить</button>
             </div>
           </div>
         </div>
@@ -856,7 +945,6 @@
               <h1 className="text-xl font-bold flex items-center gap-2">Трекер <span className="text-accent">●</span></h1>
             </div>
 
-            {/* Время для Германии */}
             <div className="mx-4 mb-6 bg-panel border border-border rounded-xl p-4 text-center">
               <div className="text-2xl font-mono font-bold tracking-tight mb-1">
                 {time.toLocaleTimeString('ru-RU', {hour12:false, timeZone: 'Europe/Berlin'})}
@@ -888,8 +976,8 @@
 
           <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
             <header className="flex items-center justify-between p-6 pb-4">
-              <div>
-                <h2 className="text-2xl font-bold flex items-center gap-2">Привет, @{owner} 👋</h2>
+              <div className="min-w-0">
+                <h2 className="text-2xl font-bold flex items-center gap-2 truncate">Привет, @{owner} 👋</h2>
                 <p className="text-xs text-textMuted mt-1">Твой прогресс и здоровье</p>
               </div>
               <SyncBadge syncing={sync.syncing} lastSync={sync.lastSync} error={sync.error} onSync={sync.forceSync} />
