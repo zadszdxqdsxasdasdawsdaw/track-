@@ -247,7 +247,6 @@
       const writeTimer = useRef(null);
       const initialised = useRef(false);
 
-      // Инициализация
       useEffect(() => {
         if (!token || !owner) return;
         let alive = true;
@@ -266,7 +265,6 @@
               lastShaRef.current = file.sha; 
             }
 
-            // Сохраняем на сервер ДО обновления UI, чтобы избежать race condition
             if (!file || JSON.stringify(merged) !== file.content) {
               const res = await ghPutFile(token, owner, REPO_NAME, FILE_PATH, JSON.stringify(merged), file?.sha);
               lastShaRef.current = res?.content?.sha ?? null;
@@ -287,7 +285,6 @@
         return () => { alive = false; };
       }, [token, owner]);
 
-      // Сохранение изменений
       useEffect(() => {
         if (!token || !owner || !initialised.current) return;
         if (writeTimer.current) clearTimeout(writeTimer.current);
@@ -315,7 +312,7 @@
                 if (JSON.stringify(toWrite) !== JSON.stringify(local)) setState(toWrite);
                 setLastSync(Date.now()); setError(null); break;
               } catch (e) {
-                if (attempt === 0 && (e.status === 409 || e.status === 422)) continue; // Конфликт, пробуем ещё раз
+                if (attempt === 0 && (e.status === 409 || e.status === 422)) continue;
                 throw e;
               }
             }
@@ -326,7 +323,6 @@
         return () => { if (writeTimer.current) clearTimeout(writeTimer.current); };
       }, [state, token, owner]);
 
-      // Опрос сервера
       useEffect(() => {
         if (!token || !owner || !initialised.current) return;
         let alive = true;
@@ -379,7 +375,7 @@
     /* ===================== COMPONENTS ===================== */
     function SyncBadge({ syncing, lastSync, error, onSync }) {
       return (
-        <button onClick={onSync} className="flex items-center gap-2 text-xs text-textMuted hover:text-accent transition px-3 py-1.5 rounded-lg border border-border bg-panel">
+        <button onClick={onSync} className="flex items-center gap-2 text-xs text-textMuted hover:text-accent transition px-3 py-1.5 rounded-lg border border-border bg-panel shrink-0">
           {error ? <span className="text-danger">⚠ ошибка</span>
            : syncing ? <span className="text-accent">↻ синхронизация</span>
            : <><span className="w-1.5 h-1.5 rounded-full bg-success"></span> обновлено {lastSync ? relativeTime(lastSync) : '—'} назад</>}
@@ -543,9 +539,9 @@
               <PeriodSelector period={weightPeriod} setPeriod={setWeightPeriod} />
             </div>
             <WeightLineChart data={weightData} />
-            <div className="flex gap-2 mt-4">
-              <input placeholder="Добавить вес на сегодня..." value={weightInput} onChange={e=>setWeightInput(e.target.value)} type="number" className="flex-1 bg-base border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-accent" />
-              <button onClick={addWeight} className="bg-accent text-base px-4 rounded-lg font-medium text-sm">ОК</button>
+            <div className="flex flex-col sm:flex-row gap-2 mt-4">
+              <input placeholder="Вес (кг)" value={weightInput} onChange={e=>setWeightInput(e.target.value)} type="number" className="flex-1 bg-base border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-accent" />
+              <button onClick={addWeight} className="bg-accent text-base px-4 rounded-lg font-medium text-sm py-2 shrink-0">Добавить</button>
             </div>
           </div>
 
@@ -795,17 +791,19 @@
           {subTab === 'weight' && (
             <div className="bg-panel border border-border rounded-2xl p-5 space-y-6">
               <h3 className="text-[11px] font-medium text-textMuted uppercase tracking-wider">Дневник веса</h3>
-              <div className="flex gap-2">
-                <input type="date" value={wDate} onChange={e=>setWDate(e.target.value)} className="bg-base border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-accent" />
-                <input placeholder="кг" value={wVal} onChange={e=>setWVal(e.target.value)} className="flex-1 bg-base border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-accent" />
-                <button onClick={addWeight} className="bg-accent text-base px-6 rounded-lg font-medium">ОК</button>
+              <div className="flex flex-col sm:flex-row gap-3">
+                <input type="date" value={wDate} onChange={e=>setWDate(e.target.value)} className="w-full sm:w-auto bg-base border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-accent" />
+                <div className="flex gap-2 flex-1">
+                  <input placeholder="Вес (кг)" value={wVal} onChange={e=>setWVal(e.target.value)} type="number" className="flex-1 w-full min-w-0 bg-base border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-accent" />
+                  <button onClick={addWeight} className="bg-accent text-base px-6 rounded-lg font-medium shrink-0">ОК</button>
+                </div>
               </div>
               <div className="space-y-2 max-h-96 overflow-auto pr-2">
                 {Object.entries(state.weights).sort((a,b) => b[0].localeCompare(a[0])).map(([d, v]) => (
                   <div key={d} className="flex justify-between items-center text-sm border-b border-border pb-2 group">
-                    <span className="text-textMuted font-mono w-24">{d}</span>
+                    <span className="text-textMuted font-mono w-24 shrink-0">{d}</span>
                     <span className="font-medium flex-1">{v.kg} кг</span>
-                    <div className="flex gap-2 opacity-0 group-hover:opacity-100 transition">
+                    <div className="flex gap-2 opacity-0 group-hover:opacity-100 transition shrink-0">
                       <button onClick={() => editWeight(d, v.kg)} className="text-textMuted hover:text-accent"><IconEdit /></button>
                       <button onClick={() => delWeight(d)} className="text-textMuted hover:text-danger">✕</button>
                     </div>
@@ -818,16 +816,20 @@
           {subTab === 'kcal' && (
             <div className="bg-panel border border-border rounded-2xl p-5 space-y-6">
               <h3 className="text-[11px] font-medium text-textMuted uppercase tracking-wider">Дневник калорий</h3>
-              <div className="flex flex-wrap gap-2">
-                <input type="date" value={kDate} onChange={e=>setKDate(e.target.value)} className="bg-base border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-accent" />
-                <select value={kDesc} onChange={e=>setKDesc(e.target.value)} className="bg-base border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-accent">
-                  <option>Завтрак</option><option>Обед</option><option>Ужин</option><option>Перекус</option><option>Приём пищи</option>
-                </select>
-                <input placeholder="ккал" type="number" value={kVal} onChange={e=>setKVal(e.target.value)} className="flex-1 bg-base border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-accent min-w-[80px]" />
-                <button onClick={addKcal} className="bg-accent text-base px-6 rounded-lg font-medium">
-                  {editKcalId ? 'Сохранить' : 'ОК'}
-                </button>
-                {editKcalId && <button onClick={() => { setEditKcalId(null); setKVal(''); setKDesc('Приём пищи'); }} className="text-textMuted hover:text-white px-2">Отмена</button>}
+              <div className="flex flex-col gap-3">
+                <div className="flex flex-col sm:flex-row gap-2">
+                  <input type="date" value={kDate} onChange={e=>setKDate(e.target.value)} className="w-full sm:w-auto bg-base border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-accent" />
+                  <select value={kDesc} onChange={e=>setKDesc(e.target.value)} className="w-full sm:w-auto bg-base border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-accent">
+                    <option>Завтрак</option><option>Обед</option><option>Ужин</option><option>Перекус</option><option>Приём пищи</option>
+                  </select>
+                </div>
+                <div className="flex gap-2">
+                  <input placeholder="ккал" type="number" value={kVal} onChange={e=>setKVal(e.target.value)} className="flex-1 min-w-0 bg-base border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-accent" />
+                  <button onClick={addKcal} className="bg-accent text-base px-6 rounded-lg font-medium shrink-0">
+                    {editKcalId ? 'Сохранить' : 'ОК'}
+                  </button>
+                  {editKcalId && <button onClick={() => { setEditKcalId(null); setKVal(''); setKDesc('Приём пищи'); }} className="text-textMuted hover:text-white px-2">Отмена</button>}
+                </div>
               </div>
 
               <div className="space-y-6 max-h-96 overflow-auto pr-2">
@@ -842,9 +844,9 @@
                       <div className="space-y-2">
                         {items.sort((a,b) => a.ts - b.ts).map(k => (
                           <div key={k.id} className="flex justify-between items-center text-sm group">
-                            <span className="text-textMuted w-24">{k.desc || 'Приём'}</span>
+                            <span className="text-textMuted w-24 shrink-0">{k.desc || 'Приём'}</span>
                             <span className="flex-1 text-right pr-4">{k.value}</span>
-                            <div className="flex gap-2 opacity-0 group-hover:opacity-100 transition">
+                            <div className="flex gap-2 opacity-0 group-hover:opacity-100 transition shrink-0">
                               <button onClick={() => editKcal(k)} className="text-textMuted hover:text-accent"><IconEdit /></button>
                               <button onClick={() => delKcal(k.id)} className="text-textMuted hover:text-danger">✕</button>
                             </div>
@@ -883,8 +885,8 @@
           <div className="bg-panel border border-border rounded-2xl p-5">
             <h3 className="text-[11px] font-medium text-textMuted uppercase tracking-wider mb-4">Цель по калориям</h3>
             <div className="flex gap-2">
-              <input type="number" value={kcalInput} onChange={e=>setKcalInput(e.target.value)} className="bg-base border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-accent w-32" />
-              <button onClick={saveKcal} className="bg-accent text-base px-4 rounded-lg font-medium">Сохранить</button>
+              <input type="number" value={kcalInput} onChange={e=>setKcalInput(e.target.value)} className="flex-1 bg-base border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-accent w-32" />
+              <button onClick={saveKcal} className="bg-accent text-base px-4 rounded-lg font-medium shrink-0">Сохранить</button>
             </div>
           </div>
 
@@ -1019,14 +1021,14 @@
 
           <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
             <header className="flex items-center justify-between p-6 pb-4">
-              <div className="min-w-0">
+              <div className="min-w-0 pr-4">
                 <h2 className="text-2xl font-bold flex items-center gap-2 truncate">Привет, @{owner} 👋</h2>
-                <p className="text-xs text-textMuted mt-1">Твой прогресс и здоровье</p>
+                <p className="text-xs text-textMuted mt-1 truncate">Твой прогресс и здоровье</p>
               </div>
               <SyncBadge syncing={sync.syncing} lastSync={sync.lastSync} error={sync.error} onSync={sync.forceSync} />
             </header>
 
-            <div className="flex-1 overflow-auto p-6 pt-2">
+            <div className="flex-1 overflow-auto p-6 pt-2 pb-24 md:pb-6">
               {sync.error && <div className="bg-danger/10 border border-danger/20 text-danger text-sm px-4 py-3 rounded-xl mb-6">{sync.error}</div>}
               
               {tab === 'dash' && <DashboardTab sync={sync} today={today} />}
